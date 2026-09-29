@@ -5,7 +5,7 @@
 技术栈：Python 3.10+ / FastAPI / SQLite / pandas + React / TypeScript / Vite / ECharts。
 数据源：东方财富行情接口（优先），腾讯财经接口（自动降级备用）；日线 K 线为**后复权**口径。
 
-## 启动
+## 启动 / 停止
 
 ```bash
 # 1. 后端依赖
@@ -19,6 +19,8 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8610
 ```
 
 浏览器打开 http://127.0.0.1:8610
+
+停止服务：双击 stop.bat（按端口 8610 结束服务进程及其子进程）。
 
 ## 六大功能
 
