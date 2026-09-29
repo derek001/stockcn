@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -291,6 +292,54 @@ def _fetch_kline_full(provider: str, stock: dict) -> list[dict]:
     return tc.fetch_kline(tcode)
 
 
+def _fetch_full_kline(provider: str, stock: dict) -> None:
+    _upsert_klines(stock["code"], _fetch_kline_full(provider, stock))
+
+
+def _covered_codes() -> set[str]:
+    """Stocks that already hold a deep history reaching the newest date locally."""
+    ref = db.query_one("SELECT MAX(date) AS d FROM kline_daily")
+    if not ref or not ref["d"]:
+        return set()
+    cutoff = (dt.date.fromisoformat(ref["d"]) - dt.timedelta(days=7)).isoformat()
+    rows = db.query("SELECT code, COUNT(*) AS n, MAX(date) AS d FROM kline_daily GROUP BY code")
+    return {r["code"] for r in rows if r["d"] >= cutoff and r["n"] >= 200}
+
+
+def _run_kline_pass(kind: str, provider: str, stocks: list[dict], fetch, label: str) -> list[dict]:
+    """Run fetch() over stocks; return the ones that still failed after retries.
+
+    tencent._pace() holds a global cooldown, so a stock that hits the WAF waits
+    the pause out on its next attempt instead of hammering the CDN.
+    """
+    total = len(stocks)
+    if not total:
+        return []
+    _update(kind, progress=0, total=total, message=f"{label} 0/{total}")
+    done = [0]
+    failed: list[dict] = []
+
+    def worker(s: dict) -> bool:
+        for attempt in range(3):
+            try:
+                fetch(provider, s)
+                return True
+            except Exception:
+                time.sleep(1.0 + attempt)
+        return False
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futs = {pool.submit(worker, s): s for s in stocks}
+        for f in as_completed(futs):
+            done[0] += 1
+            if not f.result():
+                failed.append(futs[f])
+            if done[0] % 25 == 0 or done[0] == total:
+                _update(kind, progress=done[0], total=total,
+                        message=f"{label} {done[0]}/{total}，失败 {len(failed)}")
+    return failed
+
+
 def _job_full(provider: str) -> None:
     _refresh_stock_list("full")
     if provider == "em":
@@ -298,33 +347,32 @@ def _job_full(provider: str) -> None:
     _refresh_financials("full", 12)
 
     stocks = db.query("SELECT code,name,market,secid FROM stocks WHERE is_active=1")
-    total = len(stocks)
-    _update("full", progress=0, total=total, message=f"下载K线 0/{total}")
-    done = [0]
+    covered = _covered_codes()
+    missing = [s for s in stocks if s["code"] not in covered]
+    topped = [s for s in stocks if s["code"] in covered]
 
-    def worker(s: dict):
-        rows = _fetch_kline_full(provider, s)
-        _upsert_klines(s["code"], rows)
-        return s["code"]
-
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futs = {pool.submit(worker, s): s for s in stocks}
-        for f in as_completed(futs):
-            done[0] += 1
-            try:
-                f.result()
-            except Exception:
-                pass
-            if done[0] % 25 == 0 or done[0] == total:
-                _update("full", progress=done[0], total=total,
-                        message=f"下载K线 {done[0]}/{total}")
+    # stocks with usable history only need a windowed top-up, which makes a
+    # re-run after a partial failure resume instead of re-downloading everything
+    f_missing = _run_kline_pass("full", provider, missing, _fetch_full_kline, "下载K线")
+    if f_missing:
+        f_missing = _run_kline_pass("full", provider, f_missing, _fetch_full_kline, "重试K线")
+    f_topped = _run_kline_pass("full", provider, topped, _incremental_stock, "补齐K线")
+    if f_topped:
+        f_topped = _run_kline_pass("full", provider, f_topped, _incremental_stock, "重试补齐K线")
 
     _refresh_indexes(provider)
     cnt = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
     st = db.kv_get("data_status", _default_status())
-    st["stock_count"] = total
+    st["stock_count"] = len(stocks)
     st["kline_rows"] = cnt["n"] if cnt else 0
     _save_status(st)
+
+    n_fail = len(f_missing) + len(f_topped)
+    msg = (f"K线：首次下载 {len(missing) - len(f_missing)} 只，"
+           f"更新 {len(topped) - len(f_topped)} 只")
+    if n_fail:
+        msg += f"，失败 {n_fail} 只（再跑一次全量更新可续传）"
+    _update("full", progress=len(stocks), total=len(stocks), message=msg)
 
 
 def _incremental_stock(provider: str, stock: dict) -> None:
@@ -388,27 +436,8 @@ def _job_incremental(provider: str) -> None:
     stocks = db.query(
         "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
         "WHERE s.is_active=1 AND EXISTS(SELECT 1 FROM kline_daily k WHERE k.code = s.code)")
-    total = len(stocks)
-    _update("incremental", progress=0, total=total, message=f"补齐K线 0/{total}")
-    done = [0]
-
-    def worker(s: dict):
-        _incremental_stock(provider, s)
-        return s["code"]
-
-    errors = [0]
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futs = {pool.submit(worker, s): s for s in stocks}
-        for f in as_completed(futs):
-            done[0] += 1
-            try:
-                f.result()
-            except Exception:
-                errors[0] += 1
-            if done[0] % 50 == 0 or done[0] == total:
-                _update("incremental", progress=done[0], total=total,
-                        message=f"补齐K线 {done[0]}/{total}")
+    failed = _run_kline_pass("incremental", provider, stocks, _incremental_stock, "补齐K线")
 
     _refresh_indexes(provider)
-    if errors[0]:
-        _update("incremental", message=f"{errors[0]} 只股票K线补齐失败（可稍后重试）")
+    if failed:
+        _update("incremental", message=f"{len(failed)} 只股票K线补齐失败（可稍后重试）")
