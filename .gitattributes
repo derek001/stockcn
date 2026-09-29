@@ -1,0 +1,21 @@
+# 默认：文本文件入库统一为 LF
+* text=auto
+
+# Windows 启动脚本必须是 CRLF：cmd 解析含跨行 (...) 块的批处理时，
+# LF-only 会错位并把 || 分支走错（core.autocrlf=true 会把 .bat 规范化成 LF）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制，不做行尾/文本处理
+*.db binary
+*.sqlite binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+
+# 锁文件不参与人工 diff
+package-lock.json -diff

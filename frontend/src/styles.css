@@ -1,0 +1,87 @@
+:root {
+  --bg: #12151c;
+  --panel: #1a1f29;
+  --panel2: #232a37;
+  --border: #2c3446;
+  --text: #d7dde8;
+  --muted: #8a94a6;
+  --up: #ef5350;
+  --down: #26a69a;
+  --accent: #4f8cff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+#root { min-height: 100vh; display: flex; flex-direction: column; }
+.topbar {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  padding: 0 16px; height: 52px; position: sticky; top: 0; z-index: 10;
+}
+.topbar .logo { font-weight: 700; font-size: 16px; margin-right: 18px; color: var(--accent); }
+.tab {
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; color: var(--muted);
+  border: none; background: none; font-size: 14px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent); color: #fff; }
+.page { padding: 18px; flex: 1; }
+.panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; margin-bottom: 16px;
+}
+.panel h3 { margin: 0 0 12px; font-size: 15px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.btn {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--up); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+input, select {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none;
+}
+input:focus, select:focus { border-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; background: var(--panel2); position: sticky; top: 0; }
+td:first-child, th:first-child, td.l, th.l { text-align: left; }
+tr:hover td { background: rgba(79, 140, 255, 0.06); }
+.up { color: var(--up); } .down { color: var(--down); } .muted { color: var(--muted); }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
+  background: var(--panel2); color: var(--muted); margin: 2px;
+}
+.table-wrap { overflow: auto; max-height: 560px; border: 1px solid var(--border); border-radius: 8px; }
+.progress { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; flex: 1; min-width: 160px; }
+.progress > div { height: 100%; background: var(--accent); transition: width 0.3s; }
+.grid { display: grid; gap: 14px; }
+.stock-card {
+  cursor: pointer; padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel2);
+}
+.stock-card:hover { border-color: var(--accent); }
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; min-width: 380px; max-height: 80vh; overflow: auto; }
+.chart { width: 100%; }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.pool-list { display: flex; gap: 16px; align-items: flex-start; }
+.pool-side { width: 220px; flex-shrink: 0; }
+.pool-side .item {
+  padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
+  cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+}
+.pool-side .item.active { border-color: var(--accent); background: rgba(79, 140, 255, 0.1); }
+.cond-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.spin { display: inline-block; animation: rot 1s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }

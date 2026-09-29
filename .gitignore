@@ -1,0 +1,21 @@
+# 本地数据与运行时产物
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+__pycache__/
+*.py[cod]
+
+# 依赖与构建产物
+node_modules/
+frontend/dist/
+
+# 便携版工具链（仅用于构建前端，不入库）
+.tools/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
