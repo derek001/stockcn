@@ -191,7 +191,8 @@ def _refresh_stock_list(kind: str) -> None:
             many=[{**{k: s[k] for k in ("code", "price", "pct_chg", "total_mv", "float_mv",
                                         "pe_dynamic", "pe_ttm", "pb")},
                    "trade_date": dt.date.today().isoformat(),
-                   "turnover_rate": None, "amount": s["amount"]} for s in stocks],
+                   "turnover_rate": s.get("turnover_rate"), "amount": s.get("amount")}
+                  for s in stocks],
         )
         return
     # Tencent fallback: industry boards + constituents
@@ -221,7 +222,7 @@ def _refresh_stock_list(kind: str) -> None:
                       "pct_chg": it["pct_chg"], "total_mv": it["total_mv"],
                       "float_mv": it["float_mv"], "pe_dynamic": None,
                       "pe_ttm": it["pe_ttm"], "pb": it["pb"],
-                      "turnover_rate": None, "amount": None})
+                      "turnover_rate": it["turnover_rate"], "amount": it["amount"]})
     if srows:
         db.execute(
             "INSERT INTO stocks(code,name,market,secid,industry,board_code,list_date,is_active) "
@@ -237,7 +238,10 @@ def _refresh_stock_list(kind: str) -> None:
             "VALUES(:code,:trade_date,:price,:pct_chg,:total_mv,:float_mv,:pe_dynamic,:pe_ttm,:pb,:turnover_rate,:amount) "
             "ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, price=excluded.price, "
             "pct_chg=excluded.pct_chg, total_mv=excluded.total_mv, float_mv=excluded.float_mv, "
-            "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, pb=excluded.pb",
+            "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, "
+            "pb=COALESCE(excluded.pb, fundamentals.pb), "
+            "turnover_rate=COALESCE(excluded.turnover_rate, fundamentals.turnover_rate), "
+            "amount=COALESCE(excluded.amount, fundamentals.amount)",
             many=frows,
         )
     db.execute(

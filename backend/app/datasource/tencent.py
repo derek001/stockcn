@@ -148,7 +148,10 @@ def fetch_board_stocks(board_code: str) -> list[dict]:
                 "price": _num(it.get("zxj")),
                 "pct_chg": _num(it.get("zdf")),
                 "pe_ttm": _num(it.get("pe_ttm")),
-                "pb": _num(it.get("pb")),
+                # gtimg names 市净率 pn and 换手率 hsl; 成交额 turnover is in 万元
+                "pb": _num(it.get("pn")),
+                "turnover_rate": _num(it.get("hsl")),
+                "amount": (_num(it.get("turnover")) or 0) * 1e4 or None,
                 "float_mv": (_num(it.get("ltsz")) or 0) * 1e8,
                 "total_mv": (_num(it.get("zsz")) or 0) * 1e8,
             })

@@ -22,7 +22,7 @@ DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 FS_ALL_STOCKS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 FS_INDUSTRY_BOARDS = "m:90+t:2+f:!50"
 
-STOCK_FIELDS = "f2,f3,f6,f9,f12,f13,f14,f20,f21,f23,f24,f25,f26,f100,f115"
+STOCK_FIELDS = "f2,f3,f6,f8,f9,f12,f13,f14,f20,f21,f23,f24,f25,f26,f100,f115"
 BOARD_FIELDS = "f12,f14,f2,f3,f20,f104,f105"
 KLINE_FIELDS1 = "f1,f2,f3,f4,f5,f6"
 KLINE_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
@@ -129,6 +129,7 @@ def fetch_all_stocks() -> list[dict]:
                 "price": _num(it.get("f2")),
                 "pct_chg": _num(it.get("f3")),
                 "amount": _num(it.get("f6")),
+                "turnover_rate": _num(it.get("f8")),
                 "pe_dynamic": _num(it.get("f9")),
                 "pe_ttm": _num(it.get("f115")),
                 "total_mv": _num(it.get("f20")),
@@ -216,7 +217,7 @@ def fetch_financial_report(report_date: str) -> list[dict]:
                 "revenue_yoy": _num(it.get("YSTZ")),
                 "net_profit": _num(it.get("PARENT_NETPROFIT")),
                 "net_profit_yoy": _num(it.get("SJLTZ")),
-                "roe_weighted": _num(it.get("ROEJQ")),
+                "roe_weighted": _num(it.get("WEIGHTAVG_ROE")),
                 "gross_margin": _num(it.get("XSMLL")),
             })
         pages = int(result.get("pages") or 1)
