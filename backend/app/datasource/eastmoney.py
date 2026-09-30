@@ -21,6 +21,8 @@ DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 # whole-market A-share stock filter used by clist
 FS_ALL_STOCKS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 FS_INDUSTRY_BOARDS = "m:90+t:2+f:!50"
+# SECURITY_TYPE_CODE of A股 in the datacenter reports (drops 三板股/B股)
+TYPE_CODE_ASHARE = "058001001"
 
 STOCK_FIELDS = "f2,f3,f6,f8,f9,f12,f13,f14,f20,f21,f23,f24,f25,f26,f100,f115"
 BOARD_FIELDS = "f12,f14,f2,f3,f20,f104,f105"
@@ -68,32 +70,28 @@ def _num(v):
         return None
 
 
-def secid_for(code: str, name: str = "") -> str:
-    """Eastmoney secid for a 6-digit A-share code."""
-    if code.startswith(("6", "9", "5")):
-        return f"1.{code}"
-    if code.startswith(("4", "8")):
-        return f"0.{code}"
-    return f"0.{code}"
-
-
 def market_for(code: str) -> str:
+    # 920xxx 是北交所新代码段，不能按 9 前缀一概判为沪市
+    if code.startswith(("4", "8", "92")):
+        return "BJ"
     if code.startswith(("6", "9", "5")):
         return "SH"
-    if code.startswith(("4", "8")):
-        return "BJ"
     return "SZ"
+
+
+def secid_for(code: str, name: str = "") -> str:
+    """Eastmoney secid for a 6-digit A-share code."""
+    return ("1." if market_for(code) == "SH" else "0.") + code
 
 
 def index_secid_for(code: str) -> str:
     """Secid of the broad-market index that matches a stock's market."""
-    if code.startswith(("6", "9", "5")):
+    market = market_for(code)
+    if market == "SH":
         return "1.000001"          # 上证指数
-    if code.startswith(("4", "8")):
+    if market == "BJ":
         return "0.899050"          # 北证50
-    if code.startswith("3"):
-        return "0.399006"          # 创业板指
-    return "0.399001"              # 深证成指
+    return "0.399006" if code.startswith("3") else "0.399001"
 
 
 def fetch_all_stocks() -> list[dict]:
@@ -225,3 +223,47 @@ def fetch_financial_report(report_date: str) -> list[dict]:
             break
         pn += 1
     return out
+
+
+ROSTER_COLUMNS = ("SECURITY_CODE,SECURITY_NAME_ABBR,SECUCODE,TRADE_MARKET,BOARD_NAME")
+_MARKET_BY_SUFFIX = {"SH": "SH", "SZ": "SZ", "BJ": "BJ"}
+
+
+def fetch_stock_roster(report_dates: list[str]) -> list[dict]:
+    """A-share roster (code,name,market,industry) read off the 业绩报表 rows.
+
+    The datacenter host answers even when push2's quote servers reject us, and
+    unlike Tencent's board rank (沪深A股 only) it carries 科创板 and 北交所 names.
+    The market comes from SECUCODE's suffix rather than the code prefix, so
+    920xxx lands in BJ. A stock appears once it has filed for one of
+    `report_dates`, hence the caller passes more than one quarter.
+    """
+    out: dict[str, dict] = {}
+    for rd in report_dates:
+        pn = 1
+        while True:
+            js = _get_json(DATACENTER, {
+                "reportName": "RPT_LICO_FN_CPD", "columns": ROSTER_COLUMNS,
+                "filter": f"(REPORTDATE='{rd}')(SECURITY_TYPE_CODE=\"{TYPE_CODE_ASHARE}\")",
+                "pageNumber": pn, "pageSize": 500,
+                "sortColumns": "SECURITY_CODE", "sortTypes": "1",
+            })
+            result = (js or {}).get("result") or {}
+            items = result.get("data") or []
+            if not items:
+                break
+            for it in items:
+                code = str(it.get("SECURITY_CODE") or "")
+                if len(code) != 6 or not code.isdigit() or code in out:
+                    continue
+                suffix = str(it.get("SECUCODE") or "").rsplit(".", 1)[-1].upper()
+                out[code] = {
+                    "code": code,
+                    "name": str(it.get("SECURITY_NAME_ABBR") or ""),
+                    "market": _MARKET_BY_SUFFIX.get(suffix, market_for(code)),
+                    "industry": (str(it["BOARD_NAME"]) if it.get("BOARD_NAME") else None),
+                }
+            if pn >= int(result.get("pages") or 1):
+                break
+            pn += 1
+    return list(out.values())

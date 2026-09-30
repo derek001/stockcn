@@ -159,9 +159,33 @@ def _probe_provider() -> str:
 
 # ---------- stock list & fundamentals ----------
 
+# 两条主列表来源对空值的处理不同，统一成 COALESCE：新值缺失时保留旧值
+_STOCK_UPSERT = (
+    "INSERT INTO stocks(code,name,market,secid,industry,board_code,list_date,is_active) "
+    "VALUES(:code,:name,:market,:secid,:industry,:board_code,:list_date,:is_active) "
+    "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, "
+    "secid=excluded.secid, "
+    "industry=COALESCE(excluded.industry, stocks.industry), "
+    "board_code=COALESCE(excluded.board_code, stocks.board_code), "
+    "list_date=COALESCE(excluded.list_date, stocks.list_date), is_active=1")
+
+_FUND_UPSERT = (
+    "INSERT INTO fundamentals(code,trade_date,price,pct_chg,total_mv,float_mv,"
+    "pe_dynamic,pe_ttm,pb,turnover_rate,amount) "
+    "VALUES(:code,:trade_date,:price,:pct_chg,:total_mv,:float_mv,:pe_dynamic,:pe_ttm,"
+    ":pb,:turnover_rate,:amount) "
+    "ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, price=excluded.price, "
+    "pct_chg=excluded.pct_chg, total_mv=excluded.total_mv, float_mv=excluded.float_mv, "
+    "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, "
+    "pb=COALESCE(excluded.pb, fundamentals.pb), "
+    "turnover_rate=COALESCE(excluded.turnover_rate, fundamentals.turnover_rate), "
+    "amount=COALESCE(excluded.amount, fundamentals.amount)")
+
+
 def _refresh_stock_list(kind: str) -> None:
     _update(kind, message="更新股票列表与基本面快照…")
-    stocks = None
+    # 休市日（周末、长假）不能拿今天当快照日期，否则导入后「快照与末根同日」的涨跌幅回填整批跳过
+    today = tc.market_trade_date() or dt.date.today().isoformat()
     try:
         stocks = em.fetch_all_stocks()
     except Exception:
@@ -172,87 +196,100 @@ def _refresh_stock_list(kind: str) -> None:
         for r in rows:
             r["board_code"] = None
             r["is_active"] = 1
+        db.execute(_STOCK_UPSERT, many=rows)
         db.execute(
-            "INSERT INTO stocks(code,name,market,secid,industry,board_code,list_date,is_active) "
-            "VALUES(:code,:name,:market,:secid,:industry,:board_code,:list_date,:is_active) "
-            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, "
-            "secid=excluded.secid, industry=excluded.industry, "
-            "list_date=COALESCE(excluded.list_date, stocks.list_date), is_active=1",
-            many=rows,
-        )
-        db.execute(
-            "INSERT INTO fundamentals(code,trade_date,price,pct_chg,total_mv,float_mv,pe_dynamic,pe_ttm,pb,turnover_rate,amount) "
-            "VALUES(:code,:trade_date,:price,:pct_chg,:total_mv,:float_mv,:pe_dynamic,:pe_ttm,:pb,:turnover_rate,:amount) "
-            "ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, price=excluded.price, "
-            "pct_chg=excluded.pct_chg, total_mv=excluded.total_mv, float_mv=excluded.float_mv, "
-            "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, pb=excluded.pb, "
-            "turnover_rate=COALESCE(excluded.turnover_rate, fundamentals.turnover_rate), "
-            "amount=COALESCE(excluded.amount, fundamentals.amount)",
+            _FUND_UPSERT,
             many=[{**{k: s[k] for k in ("code", "price", "pct_chg", "total_mv", "float_mv",
                                         "pe_dynamic", "pe_ttm", "pb")},
-                   "trade_date": dt.date.today().isoformat(),
+                   "trade_date": today,
                    "turnover_rate": s.get("turnover_rate"), "amount": s.get("amount")}
                   for s in stocks],
         )
-        return
-    # Tencent fallback: industry boards + constituents
-    boards = tc.fetch_industry_boards()
-    all_rows: list[dict] = []
-    total = len(boards)
-    for i, b in enumerate(boards):
-        _update(kind, progress=i, total=total, message=f"股票列表 {i + 1}/{total}")
-        try:
-            items = tc.fetch_board_stocks(b["board_code"])
-        except Exception:
-            items = []
-        for it in items:
-            all_rows.append({**it, "board_code": b["board_code"], "board_name": b["board_name"]})
-    seen = set()
-    srows, frows = [], []
-    today = dt.date.today().isoformat()
-    for it in all_rows:
-        if it["code"] in seen:
-            continue
-        seen.add(it["code"])
-        code = it["code"]
-        srows.append({"code": code, "name": it["name"], "market": em.market_for(code),
-                      "secid": em.secid_for(code), "industry": it["board_name"],
-                      "board_code": it["board_code"], "list_date": None, "is_active": 1})
-        frows.append({"code": code, "trade_date": today, "price": it["price"],
-                      "pct_chg": it["pct_chg"], "total_mv": it["total_mv"],
-                      "float_mv": it["float_mv"], "pe_dynamic": None,
-                      "pe_ttm": it["pe_ttm"], "pb": it["pb"],
-                      "turnover_rate": it["turnover_rate"], "amount": it["amount"]})
-    if srows:
+    else:
+        # Tencent fallback: industry boards + constituents
+        boards = tc.fetch_industry_boards()
+        all_rows: list[dict] = []
+        total = len(boards)
+        for i, b in enumerate(boards):
+            _update(kind, progress=i, total=total, message=f"股票列表 {i + 1}/{total}")
+            try:
+                items = tc.fetch_board_stocks(b["board_code"])
+            except Exception:
+                items = []
+            for it in items:
+                all_rows.append({**it, "board_code": b["board_code"],
+                                 "board_name": b["board_name"]})
+        seen = set()
+        srows, frows = [], []
+        for it in all_rows:
+            if it["code"] in seen:
+                continue
+            seen.add(it["code"])
+            code = it["code"]
+            srows.append({"code": code, "name": it["name"], "market": em.market_for(code),
+                          "secid": em.secid_for(code), "industry": it["board_name"],
+                          "board_code": it["board_code"], "list_date": None, "is_active": 1})
+            frows.append({"code": code, "trade_date": today, "price": it["price"],
+                          "pct_chg": it["pct_chg"], "total_mv": it["total_mv"],
+                          "float_mv": it["float_mv"], "pe_dynamic": None,
+                          "pe_ttm": it["pe_ttm"], "pb": it["pb"],
+                          "turnover_rate": it["turnover_rate"], "amount": it["amount"]})
+        if srows:
+            db.execute(_STOCK_UPSERT, many=srows)
+            db.execute(_FUND_UPSERT, many=frows)
         db.execute(
-            "INSERT INTO stocks(code,name,market,secid,industry,board_code,list_date,is_active) "
-            "VALUES(:code,:name,:market,:secid,:industry,:board_code,:list_date,:is_active) "
-            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, "
-            "secid=excluded.secid, "
-            "industry=COALESCE(excluded.industry, stocks.industry), "
-            "board_code=COALESCE(excluded.board_code, stocks.board_code), is_active=1",
-            many=srows,
+            "INSERT INTO boards(board_code,board_name,board_type) "
+            "VALUES(:board_code,:board_name,:board_type) "
+            "ON CONFLICT(board_code) DO UPDATE SET board_name=excluded.board_name",
+            many=[{"board_code": b["board_code"], "board_name": b["board_name"],
+                   "board_type": "industry"} for b in boards],
         )
-        db.execute(
-            "INSERT INTO fundamentals(code,trade_date,price,pct_chg,total_mv,float_mv,pe_dynamic,pe_ttm,pb,turnover_rate,amount) "
-            "VALUES(:code,:trade_date,:price,:pct_chg,:total_mv,:float_mv,:pe_dynamic,:pe_ttm,:pb,:turnover_rate,:amount) "
-            "ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, price=excluded.price, "
-            "pct_chg=excluded.pct_chg, total_mv=excluded.total_mv, float_mv=excluded.float_mv, "
-            "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, "
-            "pb=COALESCE(excluded.pb, fundamentals.pb), "
-            "turnover_rate=COALESCE(excluded.turnover_rate, fundamentals.turnover_rate), "
-            "amount=COALESCE(excluded.amount, fundamentals.amount)",
-            many=frows,
-        )
-    db.execute(
-        "INSERT INTO boards(board_code,board_name,board_type) VALUES(:board_code,:board_name,:board_type) "
-        "ON CONFLICT(board_code) DO UPDATE SET board_name=excluded.board_name",
-        many=[{"board_code": b["board_code"], "board_name": b["board_name"],
-               "board_type": "industry"} for b in boards],
-    )
+    _supplement_missing_stocks(kind)
+    # 补录后才是真实在册数：主列表分支早写会漏掉补进来的科创板/北交所
     st = db.kv_get("data_status", _default_status())
-    st["stock_count"] = len(srows)
+    st["stock_count"] = len(_universe())
     _save_status(st)
+
+
+def _supplement_missing_stocks(kind: str) -> int:
+    """把两条主列表来源都漏掉的股票（科创板、北交所）从东财财报接口补进 stocks。
+
+    本机连不上东财 push2，列表只能来自腾讯板块成分股，而腾讯的排行接口只覆盖 4606 只
+    沪深A股；QMT 导入又按 stocks 白名单过滤文件，688/920/8xx 的导出会被静默丢掉。
+    """
+    _update(kind, message="补录缺失板块股票列表…")
+    try:
+        roster = em.fetch_stock_roster(_recent_quarters(2))
+    except Exception:
+        return 0
+    have = {r["code"] for r in db.query("SELECT code FROM stocks")}
+    missing = [r for r in roster if r["code"] not in have]
+    if not missing:
+        return 0
+    quotes: dict[str, dict] = {}
+    try:
+        quotes = tc.fetch_quotes([(r["code"], r["market"]) for r in missing])
+    except Exception:
+        quotes = {}
+    db.execute(_STOCK_UPSERT, many=[
+        {"code": r["code"], "name": r["name"] or quotes.get(r["code"], {}).get("name") or "",
+         "market": r["market"], "secid": em.secid_for(r["code"]), "industry": r["industry"],
+         "board_code": None, "list_date": None, "is_active": 1} for r in missing])
+    today = dt.date.today().isoformat()
+    frows = []
+    for r in missing:
+        q = quotes.get(r["code"])
+        if not q or not q["price"]:
+            continue
+        frows.append({"code": r["code"], "trade_date": q["trade_date"] or today,
+                      "price": q["price"], "pct_chg": q["pct_chg"],
+                      "total_mv": q["total_mv"], "float_mv": q["float_mv"],
+                      "pe_dynamic": None, "pe_ttm": q["pe_ttm"], "pb": q["pb"],
+                      "turnover_rate": q["turnover_rate"], "amount": q["amount"]})
+    if frows:
+        db.execute(_FUND_UPSERT, many=frows)
+    _update(kind, message=f"补录缺失板块股票 {len(missing)} 只（快照 {len(frows)} 只）")
+    return len(missing)
 
 
 # ---------- boards (EM path) ----------

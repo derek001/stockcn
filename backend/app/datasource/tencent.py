@@ -11,6 +11,7 @@ pace limiter and blocks are reported as Blocked for the callers to back off.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -20,6 +21,7 @@ import requests
 from .eastmoney import _UA  # same UA
 
 GTIMG = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+QT = "https://qt.gtimg.cn"
 PROXY = "https://proxy.finance.qq.com/cgi/cgi-bin/rank"
 
 HEADERS = {"User-Agent": _UA, "Referer": "https://gu.qq.com/"}
@@ -80,7 +82,7 @@ def pause_remaining() -> float:
         return max(0.0, _cooldown_until - time.monotonic())
 
 
-def _get(url: str, params: dict, timeout: int = 20):
+def _get_text(url: str, params: dict, timeout: int = 20) -> str:
     global _block_streak
     _pace()
     r = requests.get(url, params=params, timeout=timeout, headers=HEADERS)
@@ -91,7 +93,11 @@ def _get(url: str, params: dict, timeout: int = 20):
     r.raise_for_status()
     with _pace_lock:
         _block_streak = 0
-    return r.json()
+    return body
+
+
+def _get(url: str, params: dict, timeout: int = 20):
+    return json.loads(_get_text(url, params, timeout))
 
 
 def _num(v):
@@ -159,6 +165,58 @@ def fetch_board_stocks(board_code: str) -> list[dict]:
             break
         offset += 50
     return out
+
+
+# qt.gtimg.cn 批量行情字段下标
+_Q_NAME, _Q_PRICE, _Q_DATE, _Q_PCT, _Q_AMT, _Q_TURN, _Q_PE, _Q_FLOAT, _Q_TOTAL, _Q_PB = (
+    1, 3, 30, 32, 37, 38, 39, 44, 45, 46)
+QUOTE_BATCH = 60
+
+
+def fetch_quotes(items: list[tuple[str, str]]) -> dict[str, dict]:
+    """[(code, market)] -> {code: 基本面快照}，走 qt.gtimg.cn 的批量行情。
+
+    板块排行接口只有沪深A股，这个接口连科创板和北交所都答，补录的那批股票靠它取快照。
+    """
+    out: dict[str, dict] = {}
+    syms = [f"{m.lower()}{c}" for c, m in items]
+    for i in range(0, len(syms), QUOTE_BATCH):
+        chunk = syms[i:i + QUOTE_BATCH]
+        body = _get_text(f"{QT}/q={','.join(chunk)}", {})
+        for line in body.split(";"):
+            fields = line.partition("=")[2].strip().strip('"').split("~")
+            if len(fields) <= _Q_PB or not fields[2]:
+                continue
+            d = fields[_Q_DATE]
+            out[fields[2]] = {
+                "name": fields[_Q_NAME],
+                "trade_date": f"{d[0:4]}-{d[4:6]}-{d[6:8]}" if len(d) >= 8 else None,
+                "price": _num(fields[_Q_PRICE]),
+                "pct_chg": _num(fields[_Q_PCT]),
+                # 成交额以万元计、市值以亿元计，库内统一为元
+                "amount": (_num(fields[_Q_AMT]) or 0) * 1e4 or None,
+                "turnover_rate": _num(fields[_Q_TURN]),
+                "pe_ttm": _num(fields[_Q_PE]),
+                "float_mv": (_num(fields[_Q_FLOAT]) or 0) * 1e8 or None,
+                "total_mv": (_num(fields[_Q_TOTAL]) or 0) * 1e8 or None,
+                "pb": _num(fields[_Q_PB]),
+            }
+    return out
+
+
+def market_trade_date() -> str | None:
+    """最近一个交易日：读上证指数行情里的时间戳字段。
+
+    休市日（周末、长假）不能拿 `date.today()` 当快照日期——导入后按「快照与末根同日」
+    回填涨跌幅会因此整批跳过。
+    """
+    try:
+        body = _get_text(f"{QT}/q=sh000001", {})
+    except Exception:
+        return None
+    fields = body.partition("=")[2].strip().strip('"').split("~")
+    d = fields[_Q_DATE] if len(fields) > _Q_DATE else ""
+    return f"{d[0:4]}-{d[4:6]}-{d[6:8]}" if len(d) >= 8 else None
 
 
 def fetch_kline_range(tcode: str, start: str, end: str = "2050-01-01") -> list[dict]:
