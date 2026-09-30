@@ -131,7 +131,7 @@ export default function DataCenter() {
         <label className="row" style={{ marginTop: 8 }}>
           <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)}
             style={{ width: "auto" }} />
-          <span className="muted">强制导入：忽略「疑似不复权 / 数据回退」体检拦截（覆盖率不足仍不允许导入）</span>
+          <span className="muted">强制导入：忽略「疑似不复权 / 盘中未结算 / 数据回退」体检拦截（覆盖率不足仍不允许导入）</span>
         </label>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn primary" disabled={busy} onClick={() => importLocal("full")}>
@@ -148,8 +148,8 @@ export default function DataCenter() {
         </div>
         <p className="muted">
           全量导入用 QMT 数据整体替换本地日线库（写入暂存表后一次性换名，中断不损坏已有数据）；
-          增量导入只追加各股票最后交易日之后的行情，需先完成一次全量导入。
-          上次完成: {st.last_local ?? "从未"}
+          增量导入会重写各股票最后一根K线并追加更晚的日期（当天导错了，收盘结算后重导一次即可覆盖修正），
+          需先完成一次全量导入。上次完成: {st.last_local ?? "从未"}
         </p>
       </div>
       <div className="panel">
