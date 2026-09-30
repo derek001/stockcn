@@ -24,8 +24,9 @@ PROXY = "https://proxy.finance.qq.com/cgi/cgi-bin/rank"
 
 HEADERS = {"User-Agent": _UA, "Referer": "https://gu.qq.com/"}
 
-# requests/second ceiling shared by all worker threads
-MIN_INTERVAL = float(os.getenv("STOCKCN_HTTP_INTERVAL", "0.4"))
+# requests/second ceiling shared by all worker threads. 1.0s is the rate that
+# ran overnight without a single WAF rejection; 0.4s got the IP banned twice.
+MIN_INTERVAL = float(os.getenv("STOCKCN_HTTP_INTERVAL", "1.0"))
 # first pause after a WAF rejection, doubling up to MAX_BACKOFF
 BLOCK_BACKOFF = float(os.getenv("STOCKCN_BLOCK_BACKOFF", "60"))
 MAX_BACKOFF = 900.0

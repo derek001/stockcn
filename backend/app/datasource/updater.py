@@ -275,6 +275,9 @@ def _refresh_financials(kind: str, n_quarters: int) -> None:
 # ---------- klines ----------
 
 def _upsert_klines(code: str, rows: list[dict]) -> None:
+    # gtimg's hfq series turns negative for a handful of stocks' earliest years,
+    # which makes every indicator on that segment meaningless; not worth storing.
+    rows = [r for r in rows if r["close"] is not None and r["close"] > 0]
     if not rows:
         return
     db.execute(
@@ -345,6 +348,9 @@ def _job_full(provider: str) -> None:
     if provider == "em":
         _refresh_em_boards("full")
     _refresh_financials("full", 12)
+    # refresh the market indexes up front: a run interrupted hours later must not
+    # leave 大盘线 trailing the individual stocks by several trading days
+    _refresh_indexes(provider)
 
     stocks = db.query("SELECT code,name,market,secid FROM stocks WHERE is_active=1")
     covered = _covered_codes()
@@ -432,6 +438,7 @@ def _job_incremental(provider: str) -> None:
     if provider == "em":
         _refresh_em_boards("incremental")
     _refresh_financials("incremental", 2)
+    _refresh_indexes(provider)
 
     stocks = db.query(
         "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
