@@ -533,18 +533,19 @@ def _bar_row(code: str, b: dict, fs: float | None) -> tuple:
 
 
 def preview_local(path: str) -> dict:
-    return qmt_src.check_dir(path, _universe(), _snapshot_prices())
+    return qmt_src.check_dir(path, _universe(), _snapshots())
 
 
-def _snapshot_prices() -> dict[str, float]:
-    return {r["code"]: r["price"]
-            for r in db.query("SELECT code,price FROM fundamentals") if r["price"]}
+def _snapshots() -> dict[str, dict]:
+    """code -> 最新在线快照的 现价/成交额/交易日，供导入体检抽检。"""
+    return {r["code"]: r for r in db.query(
+        "SELECT code, price, amount, trade_date FROM fundamentals") if r["price"]}
 
 
 def _job_local(kind: str, root: str, force: bool = False) -> None:
     """导入前强制体检：路径选错、导出是不复权，都会污染整个日线库。"""
     universe = _universe()
-    info = qmt_src.check_dir(root, universe, _snapshot_prices())
+    info = qmt_src.check_dir(root, universe, _snapshots())
     if info["warning"] and not force:
         raise ValueError(info["warning"] + "（确认口径无误可勾选「强制导入」）")
     if not info["matched"] or info["matched"] < len(universe) * 0.8:
@@ -566,6 +567,22 @@ def _job_local(kind: str, root: str, force: bool = False) -> None:
     else:
         _local_incremental(kind, files, shares)
     _sync_snapshot_from_klines()
+    _backfill_pct_chg()
+
+
+def _backfill_pct_chg() -> None:
+    """最新一根日线的涨跌幅改用在线快照的交易所口径。
+
+    日线是后复权价，复权环比被系统性压缩（详见 datasource/qmt.py），只有末根能拿到
+    当日真实涨跌幅；要求快照交易日与这根日线同日，否则留空而不是写入错日期的数。
+    """
+    db.execute(
+        "UPDATE kline_daily SET pct_chg = "
+        "  (SELECT f.pct_chg FROM fundamentals f WHERE f.code = kline_daily.code) "
+        "WHERE date = (SELECT MAX(date) FROM kline_daily) "
+        "  AND EXISTS (SELECT 1 FROM fundamentals f "
+        "              WHERE f.code = kline_daily.code AND f.trade_date = kline_daily.date "
+        "                AND f.pct_chg IS NOT NULL)")
 
 
 def _sync_snapshot_from_klines() -> None:
@@ -644,7 +661,8 @@ def _local_incremental(kind: str, files: dict, shares: dict[str, float]) -> None
             bars = []
         cutoff = last.get(code)
         if cutoff:
-            bars = [b for b in bars if b["date"] > cutoff]
+            # 含 cutoff 当天：末根若是盘中导出的快照，重新导出后可以在这里覆盖修正
+            bars = [b for b in bars if b["date"] >= cutoff]
         if bars:
             fs = shares.get(code)
             db.execute(_KLINE_INSERT,

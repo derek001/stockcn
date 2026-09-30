@@ -90,7 +90,6 @@ def read_bars(path: Path) -> list[dict]:
     if idx is None:
         raise ValueError(f"{path.name} 表头无法识别（需 timetag,open,high,low,close,volumn,amount）")
     bars: list[dict] = []
-    prev_close: float | None = None
     for ln in lines[1:]:
         parts = ln.split(",")
         try:
@@ -106,18 +105,20 @@ def read_bars(path: Path) -> list[dict]:
             continue
         if len(tag) < 8 or not c:
             continue
-        pct = round((c - prev_close) / prev_close * 100, 4) if prev_close else None
-        prev_close = c
+        # QMT 后复权是仿射变换（adj = A·raw + B），复权价环比会系统性压缩交易所口径的
+        # 涨跌幅，所以这里不伪造 pct_chg；最新一根在导入后按在线快照回填。
         bars.append({"date": d, "open": o, "high": h, "low": l, "close": c,
-                     "volume": v, "amount": a, "pct_chg": pct})
+                     "volume": v, "amount": a, "pct_chg": None})
     return bars
 
 
-def check_dir(root: str, universe: dict[str, str], snapshot: dict[str, float] | None = None
-              ) -> dict:
-    """导入前的目录体检：覆盖情况 + 复权口径提示（只读，不写库）。
+def check_dir(root: str, universe: dict[str, str],
+              snapshot: dict[str, dict] | None = None) -> dict:
+    """导入前的目录体检：覆盖情况 + 复权口径 + 是否收盘结算后导出（只读，不写库）。
 
     universe: code -> 市场（SH/SZ/BJ），即待导入的股票白名单。
+    snapshot: code -> {"price", "amount", "trade_date"}，取最新在线快照，用于两项抽检：
+      末根收盘价≈快照价 => 疑似不复权；末根成交额明显低于快照成交额 => 疑似盘中/未结算导出。
     """
     all_files = scan_files(root, universe)
     res = {
@@ -131,28 +132,41 @@ def check_dir(root: str, universe: dict[str, str], snapshot: dict[str, float] | 
     }
     snapshot = snapshot or {}
     latest = ""
-    if snapshot:
-        picked = [c for c in list(all_files)[:400] if c in snapshot]
-        seen = aligned = 0
-        for code in picked:
-            try:
-                bars = read_bars(all_files[code])
-            except ValueError:
-                bars = []
-            if not bars:
-                continue
-            latest = max(latest, bars[-1]["date"])
-            ratio = bars[-1]["close"] / snapshot[code] if snapshot[code] else None
-            if ratio is None:
-                continue
-            seen += 1
-            if abs(ratio - 1.0) < 0.03:
-                aligned += 1
-            if seen >= 30:
-                break
-        res["latest_date"] = latest
-        if seen and aligned / seen > 0.7:
-            res["warning"] = (
-                f"抽检 {seen} 只：{aligned} 只末根收盘价与最新快照价基本一致，"
-                "疑似导出的是「不复权」数据。请在 QMT 导出时选择「后复权」，否则历史涨跌与分红送配不符。")
+    price_seen = price_aligned = amt_seen = 0
+    amt_ratios: list[float] = []
+    for code in list(all_files)[:400]:
+        try:
+            bars = read_bars(all_files[code])
+        except ValueError:
+            bars = []
+        if not bars:
+            continue
+        last = bars[-1]
+        latest = max(latest, last["date"])
+        snap = snapshot.get(code) or {}
+        if snap.get("price"):
+            price_seen += 1
+            if abs(last["close"] / snap["price"] - 1.0) < 0.03:
+                price_aligned += 1
+        # 快照交易日必须与末根同日，成交额比值才可比
+        if snap.get("amount") and snap.get("trade_date") == last["date"] and last["amount"]:
+            amt_ratios.append(float(last["amount"]) / float(snap["amount"]))
+            amt_seen += 1
+        if price_seen >= 30 and amt_seen >= 30:
+            break
+    res["latest_date"] = latest
+    if price_seen and price_aligned / price_seen > 0.7:
+        res["warning"] = (
+            f"抽检 {price_seen} 只：{price_aligned} 只末根收盘价与最新快照价基本一致，"
+            "疑似导出的是「不复权」数据。请在 QMT 导出时选择「后复权」，否则历史涨跌与分红送配不符。")
+    if amt_seen >= 10:
+        amt_ratios.sort()
+        median = amt_ratios[len(amt_ratios) // 2]
+        if median < 0.9:
+            low = sum(1 for r in amt_ratios if r < 0.9)
+            msg = (
+                f"抽检 {amt_seen} 只：末根成交额只有收盘快照的 {median:.0%}（{low} 只偏低），"
+                "疑似盘中或当日数据尚未结算时导出。这样的末根只有半天量额，"
+                "请改在收盘结算后（建议 18:00 之后）重新导出再导入。")
+            res["warning"] = f"{res['warning']}；{msg}" if res["warning"] else msg
     return res
