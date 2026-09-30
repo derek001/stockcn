@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .config import DB_PATH
@@ -19,6 +20,19 @@ def get_conn() -> sqlite3.Connection:
             _conn.executescript(schema)
             _conn.commit()
     return _conn
+
+
+@contextmanager
+def transaction():
+    """一批写入要么全部生效要么全部回滚（本地导入换表、批量落库用）。"""
+    conn = get_conn()
+    with _lock:
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def query(sql: str, args: tuple = ()) -> list[dict]:

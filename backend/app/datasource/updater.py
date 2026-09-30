@@ -1,9 +1,15 @@
-"""Background data jobs: 全量更新 (full) and 增量更新 (incremental).
+"""Background data jobs: 全量更新 (full)、增量更新 (incremental) and 本地导入 (qmt_full /
+qmt_incremental) from a QMT export directory.
 
 Provider strategy: probe Eastmoney at job start; if its quote servers reject
 us, fall back to Tencent for the whole run. K-lines are stored as 后复权(hfq)
 bars; incremental updates still detect adjustment-base shifts by comparing
 overlapping bars and rescale the stored history when prices differ.
+
+hfq bases differ between providers, so a database built by one source must not
+be topped up by another: `data_status.kline_source` records which ('remote' or
+'qmt') owns the current bars. On a QMT library the online 增量更新 keeps refreshing
+lists/reports/indexes but skips the K-line pass, and 全量更新 is refused outright.
 """
 from __future__ import annotations
 
@@ -15,30 +21,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .. import db
 from ..datasource import eastmoney as em
+from ..datasource import qmt as qmt_src
 from ..datasource import tencent as tc
 
 _status_lock = threading.Lock()
 _running: dict[str, threading.Thread] = {}
 
+LOCAL_KINDS = ("qmt_full", "qmt_incremental")
+
+
+def _job_state() -> dict:
+    return {"status": "idle", "progress": 0, "total": 0, "message": "", "time": None}
+
 
 def _default_status() -> dict:
     return {
-        "full": {"status": "idle", "progress": 0, "total": 0, "message": "", "time": None},
-        "incremental": {"status": "idle", "progress": 0, "total": 0, "message": "", "time": None},
+        "full": _job_state(),
+        "incremental": _job_state(),
+        "local": _job_state(),
         "provider": None,
+        "kline_source": None,
         "stock_count": 0,
         "last_full": None,
         "last_incremental": None,
+        "last_local": None,
     }
 
 
+def _norm(st: dict) -> dict:
+    base = _default_status()
+    for k, v in base.items():
+        if isinstance(v, dict):
+            merged = dict(v)
+            merged.update(st.get(k) or {})
+            st[k] = merged
+        else:
+            st.setdefault(k, v)
+    return st
+
+
+def _status_key(kind: str) -> str:
+    """本地导入的 qmt_full / qmt_incremental 共用状态面板 'local'。"""
+    return "local" if kind in LOCAL_KINDS else kind
+
+
 def get_status() -> dict:
-    st = db.kv_get("data_status", _default_status())
+    st = _norm(db.kv_get("data_status", _default_status()))
     with _status_lock:
         st["running"] = sorted(_running.keys())
-    for kind in ("full", "incremental"):
-        if kind not in st["running"] and st.get(kind, {}).get("status") == "running":
-            st[kind] = {"status": "error", "progress": 0, "total": 0,
+        active = {_status_key(k) for k in _running}
+    for kind in ("full", "incremental", "local"):
+        if kind not in active and st[kind].get("status") == "running":
+            st[kind] = {**_job_state(), "status": "error",
                         "message": "任务已中断（服务重启）", "time": st[kind].get("time")}
     if not st.get("running"):
         row = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
@@ -46,13 +80,17 @@ def get_status() -> dict:
     return st
 
 
+def kline_source() -> str | None:
+    return _norm(db.kv_get("data_status", _default_status())).get("kline_source")
+
+
 def _save_status(st: dict) -> None:
     db.kv_set("data_status", st)
 
 
 def _update(kind: str, **kw) -> None:
-    st = db.kv_get("data_status", _default_status())
-    st[kind].update(kw)
+    st = _norm(db.kv_get("data_status", _default_status()))
+    st[_status_key(kind)].update(kw)
     _save_status(st)
 
 
@@ -61,39 +99,43 @@ def is_busy() -> bool:
         return bool(_running)
 
 
-def start_job(kind: str) -> str:
-    """kind: full | incremental"""
+def start_job(kind: str, path: str | None = None) -> str:
+    """kind: full | incremental | qmt_full | qmt_incremental"""
     with _status_lock:
         if kind in _running:
             return "already running"
-        t = threading.Thread(target=_run_job, args=(kind,), daemon=True)
+        t = threading.Thread(target=_run_job, args=(kind, path), daemon=True)
         _running[kind] = t
         t.start()
     return "started"
 
 
-def _run_job(kind: str) -> None:
+def _run_job(kind: str, path: str | None = None) -> None:
     try:
         _update(kind, status="running", progress=0, total=0, message="准备中…")
-        provider = _probe_provider()
-        st = db.kv_get("data_status", _default_status())
-        st["provider"] = provider
-        _save_status(st)
-        if kind == "full":
-            _job_full(provider)
+        if kind in LOCAL_KINDS:
+            _job_local(kind, path or "")
+            source = "qmt"
         else:
-            _job_incremental(provider)
-        st = db.kv_get("data_status", _default_status())
-        msg = st.get(kind, {}).get("message", "")
-        if "失败" not in msg:
+            provider = _probe_provider()
+            st = _norm(db.kv_get("data_status", _default_status()))
+            st["provider"] = provider
+            _save_status(st)
+            if kind == "full":
+                _job_full(provider)
+            else:
+                _job_incremental(provider)
+            source = "remote"
+        st = _norm(db.kv_get("data_status", _default_status()))
+        key = _status_key(kind)
+        msg = st[key].get("message", "")
+        if not st[key].get("final") and "失败" not in msg:
             msg = "完成"
-        _update(kind, status="done",
-                message=msg, time=dt.datetime.now().isoformat(timespec="seconds"))
-        st = db.kv_get("data_status", _default_status())
-        if kind == "full":
-            st["last_full"] = st["full"]["time"]
-        else:
-            st["last_incremental"] = st["incremental"]["time"]
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        _update(kind, status="done", message=msg, time=now, final=False)
+        st = _norm(db.kv_get("data_status", _default_status()))
+        st["kline_source"] = source
+        st[f"last_{key}"] = now
         _save_status(st)
     except Exception as e:
         traceback.print_exc()
@@ -443,8 +485,133 @@ def _job_incremental(provider: str) -> None:
     stocks = db.query(
         "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
         "WHERE s.is_active=1 AND EXISTS(SELECT 1 FROM kline_daily k WHERE k.code = s.code)")
+    if kline_source() == "qmt":
+        # 在线源的复权基准与 QMT 不同，日线交给「增量导入」，这里只刷新列表/财报/指数
+        _update("incremental", progress=1, total=1, final=True,
+                message="日线库为 QMT 导入，已跳过K线补齐（请用「增量导入」更新日线）")
+        return
     failed = _run_kline_pass("incremental", provider, stocks, _incremental_stock, "补齐K线")
 
     _refresh_indexes(provider)
     if failed:
         _update("incremental", message=f"{len(failed)} 只股票K线补齐失败（可稍后重试）")
+
+
+# ---------- 本地导入（QMT 导出目录） ----------
+
+_KLINE_INSERT = ("INSERT OR REPLACE INTO kline_daily"
+                 "(code,date,open,high,low,close,volume,amount,pct_chg,turnover) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?)")
+
+
+def _universe() -> dict[str, str]:
+    return {r["code"]: r["market"]
+            for r in db.query("SELECT code,market FROM stocks WHERE is_active=1")}
+
+
+def _float_shares() -> dict[str, float]:
+    """code -> 流通股本（股），由最新快照的流通市值/现价反推。"""
+    out = {}
+    for r in db.query("SELECT code,float_mv,price FROM fundamentals"):
+        if r["float_mv"] and r["price"]:
+            out[r["code"]] = r["float_mv"] / r["price"]
+    return out
+
+
+def _bar_row(code: str, b: dict, fs: float | None) -> tuple:
+    turnover = round(b["volume"] / fs * 100, 4) if fs else None
+    return (code, b["date"], b["open"], b["high"], b["low"], b["close"],
+            b["volume"], b["amount"], b["pct_chg"], turnover)
+
+
+def preview_local(path: str) -> dict:
+    snap = {r["code"]: r["price"]
+            for r in db.query("SELECT code,price FROM fundamentals") if r["price"]}
+    return qmt_src.check_dir(path, _universe(), snap)
+
+
+def _job_local(kind: str, root: str) -> None:
+    files = qmt_src.scan_files(root, _universe())
+    shares = _float_shares()
+    _update(kind, progress=0, total=len(files),
+            message=f"导入 QMT 导出 0/{len(files)}")
+    if kind == "qmt_full":
+        _local_full(kind, files, shares)
+    else:
+        _local_incremental(kind, files, shares)
+
+
+def _local_full(kind: str, files: dict, shares: dict[str, float]) -> None:
+    """先写暂存表再原子换名：任务中断时现有日线库不受影响。"""
+    with db.transaction() as conn:
+        conn.execute("DROP TABLE IF EXISTS kline_stage")
+        conn.execute(
+            "CREATE TABLE kline_stage("
+            "code TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL,"
+            "volume REAL, amount REAL, pct_chg REAL, turnover REAL, PRIMARY KEY(code,date))")
+    total = len(files)
+    done = failed = rows = 0
+    batch: list[tuple] = []
+    sql = ("INSERT OR IGNORE INTO kline_stage"
+           "(code,date,open,high,low,close,volume,amount,pct_chg,turnover) "
+           "VALUES(?,?,?,?,?,?,?,?,?,?)")
+    for code, path in files.items():
+        try:
+            bars = qmt_src.read_bars(path)
+        except Exception:
+            failed += 1
+            bars = []
+        fs = shares.get(code)
+        batch.extend(_bar_row(code, b, fs) for b in bars)
+        rows += len(bars)
+        done += 1
+        if len(batch) >= 50000 or done == total:
+            with db.transaction() as conn:
+                conn.executemany(sql, batch)
+            batch = []
+        if done % 100 == 0 or done == total:
+            _update(kind, progress=done, total=total,
+                    message=f"导入 QMT 导出 {done}/{total}")
+    with db.transaction() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_kline_date")
+        conn.execute("DROP TABLE IF EXISTS kline_daily_old")
+        conn.execute("ALTER TABLE kline_daily RENAME TO kline_daily_old")
+        conn.execute("ALTER TABLE kline_stage RENAME TO kline_daily")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_daily(date)")
+    db.execute("DROP TABLE IF EXISTS kline_daily_old")
+    st = _norm(db.kv_get("data_status", _default_status()))
+    st["stock_count"] = len(_universe())
+    _save_status(st)
+    msg = f"导入 {rows} 行 / {total} 只"
+    if failed:
+        msg += f"，失败 {failed} 只"
+    _update(kind, message=msg, final=True)
+
+
+def _local_incremental(kind: str, files: dict, shares: dict[str, float]) -> None:
+    last = {r["code"]: r["d"] for r in db.query(
+        "SELECT code, MAX(date) AS d FROM kline_daily GROUP BY code")}
+    total = len(files)
+    done = failed = added = 0
+    for code, path in files.items():
+        try:
+            bars = qmt_src.read_bars(path)
+        except Exception:
+            failed += 1
+            bars = []
+        cutoff = last.get(code)
+        if cutoff:
+            bars = [b for b in bars if b["date"] > cutoff]
+        if bars:
+            fs = shares.get(code)
+            db.execute(_KLINE_INSERT,
+                       many=[_bar_row(code, b, fs) for b in bars])
+            added += len(bars)
+        done += 1
+        if done % 100 == 0 or done == total:
+            _update(kind, progress=done, total=total,
+                    message=f"导入 QMT 导出 {done}/{total}")
+    msg = f"补齐 {added} 行"
+    if failed:
+        msg += f"，失败 {failed} 只"
+    _update(kind, message=msg, final=True)
