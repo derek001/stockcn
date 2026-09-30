@@ -86,7 +86,8 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
             )}
             <th className="l">代码</th><th className="l">名称</th><th className="l">行业</th>
             {hasScore && <th>得分</th>}
-            <th>最新价</th><th>涨跌幅</th><th>市值(亿)</th><th>PE(TTM)</th><th>PB</th>
+            <th>最新价</th><th>涨跌幅</th><th>成交额(亿)</th><th>换手率%</th>
+            <th>市值(亿)</th><th>PE(TTM)</th><th>PB</th>
             <th>ROE</th><th>营收同比</th><th>净利同比</th><th>RSI</th><th className="l">信号</th>
           </tr>
         </thead>
@@ -105,6 +106,8 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
               {hasScore && <td><b>{fmt.n(r.score as number, 4)}</b></td>}
               <td>{fmt.n(r.price as number)}</td>
               <td dangerouslySetInnerHTML={{ __html: fmt.pct(r.pct_chg as number) }} />
+              <td>{fmt.n(r.amount as number)}</td>
+              <td>{fmt.n(r.turnover_rate as number)}</td>
               <td>{fmt.n(r.total_mv as number)}</td>
               <td>{fmt.n(r.pe_ttm as number)}</td>
               <td>{fmt.n(r.pb as number)}</td>
@@ -116,7 +119,7 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
             </tr>
           ))}
           {!rows.length && (
-            <tr><td colSpan={15} className="l muted">无匹配结果</td></tr>
+            <tr><td colSpan={17} className="l muted">无匹配结果</td></tr>
           )}
         </tbody>
       </table>

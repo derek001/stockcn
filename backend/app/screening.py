@@ -28,6 +28,8 @@ FUNDAMENTAL_FIELDS = [
     {"field": "pb", "label": "市净率", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "price", "label": "最新价(元)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "pct_chg", "label": "涨跌幅(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
+    {"field": "amount", "label": "成交额(亿)", "type": "number", "ops": [">=", "<=", ">", "<"]},
+    {"field": "turnover_rate", "label": "换手率(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "eps", "label": "每股收益(元)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "revenue_yoy", "label": "营收同比(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "net_profit_yoy", "label": "净利润同比(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
@@ -67,7 +69,8 @@ def load_universe(force: bool = False) -> dict[str, dict]:
 
     rows = db.query(
         "SELECT s.code, s.name, s.market, s.industry, s.list_date, "
-        "f.trade_date, f.price, f.pct_chg, f.total_mv, f.float_mv, f.pe_ttm, f.pb, f.turnover_rate "
+        "f.trade_date, f.price, f.pct_chg, f.total_mv, f.float_mv, f.pe_ttm, f.pb, "
+        "f.turnover_rate, f.amount "
         "FROM stocks s LEFT JOIN fundamentals f ON f.code = s.code WHERE s.is_active = 1")
     universe = {r["code"]: dict(r) for r in rows}
 
@@ -98,12 +101,14 @@ def load_universe(force: bool = False) -> dict[str, dict]:
             if snap:
                 universe[code]["tech"] = snap
 
-    # display units: yuan -> 亿 for market cap
+    # display units: yuan -> 亿 for market cap and turnover amount
     for c, u in universe.items():
         if u.get("total_mv"):
             u["total_mv"] = u["total_mv"] / 1e8
         if u.get("float_mv"):
             u["float_mv"] = u["float_mv"] / 1e8
+        if u.get("amount"):
+            u["amount"] = u["amount"] / 1e8
 
     _cache["ts"], _cache["data"] = now, universe
     return universe
@@ -185,6 +190,8 @@ def _row(code: str, ctx: dict) -> dict:
         "float_mv": ctx.get("float_mv"),
         "pe_ttm": ctx.get("pe_ttm"),
         "pb": ctx.get("pb"),
+        "amount": ctx.get("amount"),
+        "turnover_rate": ctx.get("turnover_rate"),
         "roe_weighted": ctx.get("roe_weighted"),
         "revenue_yoy": ctx.get("revenue_yoy"),
         "net_profit_yoy": ctx.get("net_profit_yoy"),

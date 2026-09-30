@@ -134,7 +134,9 @@ def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
         now = dt.datetime.now().isoformat(timespec="seconds")
         _update(kind, status="done", message=msg, time=now, final=False)
         st = _norm(db.kv_get("data_status", _default_status()))
-        st["kline_source"] = source
+        if kind in LOCAL_KINDS or kind == "full":
+            # 只有真正写过日线才动口径标记：QMT 库上的「增量更新」会跳过K线补齐
+            st["kline_source"] = source
         st[f"last_{key}"] = now
         _save_status(st)
     except Exception as e:
@@ -184,7 +186,8 @@ def _refresh_stock_list(kind: str) -> None:
             "ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, price=excluded.price, "
             "pct_chg=excluded.pct_chg, total_mv=excluded.total_mv, float_mv=excluded.float_mv, "
             "pe_dynamic=excluded.pe_dynamic, pe_ttm=excluded.pe_ttm, pb=excluded.pb, "
-            "turnover_rate=excluded.turnover_rate, amount=excluded.amount",
+            "turnover_rate=COALESCE(excluded.turnover_rate, fundamentals.turnover_rate), "
+            "amount=COALESCE(excluded.amount, fundamentals.amount)",
             many=[{**{k: s[k] for k in ("code", "price", "pct_chg", "total_mv", "float_mv",
                                         "pe_dynamic", "pe_ttm", "pb")},
                    "trade_date": dt.date.today().isoformat(),
@@ -482,14 +485,15 @@ def _job_incremental(provider: str) -> None:
     _refresh_financials("incremental", 2)
     _refresh_indexes(provider)
 
-    stocks = db.query(
-        "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
-        "WHERE s.is_active=1 AND EXISTS(SELECT 1 FROM kline_daily k WHERE k.code = s.code)")
     if kline_source() == "qmt":
         # 在线源的复权基准与 QMT 不同，日线交给「增量导入」，这里只刷新列表/财报/指数
         _update("incremental", progress=1, total=1, final=True,
                 message="日线库为 QMT 导入，已跳过K线补齐（请用「增量导入」更新日线）")
         return
+
+    stocks = db.query(
+        "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
+        "WHERE s.is_active=1 AND EXISTS(SELECT 1 FROM kline_daily k WHERE k.code = s.code)")
     failed = _run_kline_pass("incremental", provider, stocks, _incremental_stock, "补齐K线")
 
     _refresh_indexes(provider)
