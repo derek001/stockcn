@@ -10,7 +10,7 @@ interface Status {
 }
 interface Preview {
   path: string; files: number; matched: number; missing: number;
-  sample_missing: string[]; warning: string;
+  sample_missing: string[]; latest_date: string; warning: string;
 }
 
 const DEFAULT_PATH = "E:\\Project\\QMT数据";
@@ -37,6 +37,7 @@ export default function DataCenter() {
   const [err, setErr] = useState("");
   const [path, setPath] = useState(DEFAULT_PATH);
   const [pv, setPv] = useState<Preview | null>(null);
+  const [force, setForce] = useState(false);
 
   useEffect(() => {
     const tick = () =>
@@ -69,7 +70,7 @@ export default function DataCenter() {
     if (mode === "full" && !window.confirm(
       "全量导入会用 QMT 数据整体替换本地日线库（导入期间不影响查询），确定继续？")) return;
     try {
-      await api.post("/api/data/qmt/import", { path, mode });
+      await api.post("/api/data/qmt/import", { path, mode, force });
     } catch (e) {
       setErr(String((e as Error).message));
     }
@@ -106,8 +107,10 @@ export default function DataCenter() {
           <code> price_600000.txt</code>（或 .csv）形式，表头
           <code> timetag,open,high,low,close,volumn,amount</code>。
           <span className="up">必须选择「后复权」</span>
-          （本项目日线为后复权口径；不复权数据涨跌与分红送配不符），QMT 导出不含换手率，
-          导入时按最新流通股本估算。
+          （本项目日线为后复权口径；不复权数据涨跌与分红送配不符，导入前会做体检拦截）。
+          QMT 导出<strong>只覆盖日线K线</strong>：股票列表、基本面快照、季度财报、指数K线仍由
+          「全量/增量更新」从在线接口维护，导入任务不会碰这些表。
+          导出不含换手率，导入时按最新流通股本估算，并用最后一根日线补空快照的成交额/换手率。
         </p>
         <div className="row">
           <input style={{ flex: 1, minWidth: 260 }} value={path}
@@ -121,9 +124,15 @@ export default function DataCenter() {
             <span className="badge">缺文件: {pv.missing}
               {pv.missing > 0 && pv.sample_missing.length ? `（如 ${pv.sample_missing.slice(0, 5).join("、")}）` : ""}
             </span>
+            {pv.latest_date && <span className="badge">数据截止: {pv.latest_date}</span>}
             {pv.warning && <span className="up">{pv.warning}</span>}
           </div>
         )}
+        <label className="row" style={{ marginTop: 8 }}>
+          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)}
+            style={{ width: "auto" }} />
+          <span className="muted">强制导入：忽略「疑似不复权 / 数据回退」体检拦截（覆盖率不足仍不允许导入）</span>
+        </label>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn primary" disabled={busy} onClick={() => importLocal("full")}>
             {st.local.status === "running" ? "运行中…" : "全量导入"}

@@ -99,22 +99,22 @@ def is_busy() -> bool:
         return bool(_running)
 
 
-def start_job(kind: str, path: str | None = None) -> str:
+def start_job(kind: str, path: str | None = None, force: bool = False) -> str:
     """kind: full | incremental | qmt_full | qmt_incremental"""
     with _status_lock:
         if kind in _running:
             return "already running"
-        t = threading.Thread(target=_run_job, args=(kind, path), daemon=True)
+        t = threading.Thread(target=_run_job, args=(kind, path, force), daemon=True)
         _running[kind] = t
         t.start()
     return "started"
 
 
-def _run_job(kind: str, path: str | None = None) -> None:
+def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
     try:
         _update(kind, status="running", progress=0, total=0, message="准备中…")
         if kind in LOCAL_KINDS:
-            _job_local(kind, path or "")
+            _job_local(kind, path or "", force)
             source = "qmt"
         else:
             provider = _probe_provider()
@@ -525,20 +525,55 @@ def _bar_row(code: str, b: dict, fs: float | None) -> tuple:
 
 
 def preview_local(path: str) -> dict:
-    snap = {r["code"]: r["price"]
+    return qmt_src.check_dir(path, _universe(), _snapshot_prices())
+
+
+def _snapshot_prices() -> dict[str, float]:
+    return {r["code"]: r["price"]
             for r in db.query("SELECT code,price FROM fundamentals") if r["price"]}
-    return qmt_src.check_dir(path, _universe(), snap)
 
 
-def _job_local(kind: str, root: str) -> None:
-    files = qmt_src.scan_files(root, _universe())
+def _job_local(kind: str, root: str, force: bool = False) -> None:
+    """导入前强制体检：路径选错、导出是不复权，都会污染整个日线库。"""
+    universe = _universe()
+    info = qmt_src.check_dir(root, universe, _snapshot_prices())
+    if info["warning"] and not force:
+        raise ValueError(info["warning"] + "（确认口径无误可勾选「强制导入」）")
+    if not info["matched"] or info["matched"] < len(universe) * 0.8:
+        raise ValueError(
+            f"目录里只匹配到 {info['matched']}/{len(universe)} 只股票，"
+            "疑似路径选错或 QMT 导出尚未完成（不足 80% 覆盖率不允许导入）")
+    files = qmt_src.scan_files(root, universe)
     shares = _float_shares()
+    if kind == "qmt_full" and info["latest_date"] and not force:
+        local_last = db.query_one("SELECT MAX(date) AS d FROM kline_daily")
+        if local_last and local_last["d"] and info["latest_date"] < local_last["d"]:
+            raise ValueError(
+                f"导出数据只到 {info['latest_date']}，本地库已到 {local_last['d']}；"
+                "全量导入会让历史回退，请在 QMT 里重新导出到最新交易日")
     _update(kind, progress=0, total=len(files),
             message=f"导入 QMT 导出 0/{len(files)}")
     if kind == "qmt_full":
         _local_full(kind, files, shares)
     else:
         _local_incremental(kind, files, shares)
+    _sync_snapshot_from_klines()
+
+
+def _sync_snapshot_from_klines() -> None:
+    """腾讯/降级源不返回成交额与换手率，选股条件因此永远不命中；用最新一根日线补空。
+
+    只填空值，不覆盖在线快照；补的是该股票最后一根日线当天的数，可能比快照日期滞后。
+    """
+    db.execute(
+        "UPDATE fundamentals SET "
+        "  amount = COALESCE(amount, (SELECT k.amount FROM kline_daily k "
+        "                             WHERE k.code = fundamentals.code "
+        "                             ORDER BY k.date DESC LIMIT 1)), "
+        "  turnover_rate = COALESCE(turnover_rate, (SELECT k.turnover FROM kline_daily k "
+        "                             WHERE k.code = fundamentals.code "
+        "                             ORDER BY k.date DESC LIMIT 1)) "
+        "WHERE amount IS NULL OR turnover_rate IS NULL")
 
 
 def _local_full(kind: str, files: dict, shares: dict[str, float]) -> None:

@@ -52,6 +52,7 @@ def data_incremental():
 class QmtImportReq(BaseModel):
     path: str
     mode: str = "full"          # full | incremental
+    force: bool = False         # 跳过「疑似不复权」体检（口径自负的风险由操作者确认）
 
 
 @app.post("/api/data/qmt/preview")
@@ -77,7 +78,7 @@ def qmt_import(body: QmtImportReq):
         kind = "qmt_incremental"
     else:
         raise HTTPException(400, "mode 需为 full 或 incremental")
-    updater.start_job(kind, body.path)
+    updater.start_job(kind, body.path, body.force)
     return {"ok": True}
 
 

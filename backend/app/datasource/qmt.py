@@ -126,9 +126,11 @@ def check_dir(root: str, universe: dict[str, str], snapshot: dict[str, float] | 
         "matched": len(all_files),
         "missing": len(universe) - len(all_files),
         "sample_missing": sorted(set(universe) - set(all_files))[:10],
+        "latest_date": "",
         "warning": "",
     }
     snapshot = snapshot or {}
+    latest = ""
     if snapshot:
         picked = [c for c in list(all_files)[:400] if c in snapshot]
         seen = aligned = 0
@@ -139,6 +141,7 @@ def check_dir(root: str, universe: dict[str, str], snapshot: dict[str, float] | 
                 bars = []
             if not bars:
                 continue
+            latest = max(latest, bars[-1]["date"])
             ratio = bars[-1]["close"] / snapshot[code] if snapshot[code] else None
             if ratio is None:
                 continue
@@ -147,6 +150,7 @@ def check_dir(root: str, universe: dict[str, str], snapshot: dict[str, float] | 
                 aligned += 1
             if seen >= 30:
                 break
+        res["latest_date"] = latest
         if seen and aligned / seen > 0.7:
             res["warning"] = (
                 f"抽检 {seen} 只：{aligned} 只末根收盘价与最新快照价基本一致，"
