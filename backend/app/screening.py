@@ -84,10 +84,13 @@ def load_universe(force: bool = False) -> dict[str, dict]:
             universe[r["code"]].update({k: r[k] for k in r
                                         if k not in ("code", "rn")})
 
-    # technicals: last 260 trading bars per stock
+    # technicals: last 260 trading bars per stock，指标一律用复权价（价格 × 因子）
     cutoff = (dt.date.today() - dt.timedelta(days=420)).isoformat()
     bars = db.query(
-        "SELECT code, date, open, high, low, close, volume, amount, pct_chg "
+        "SELECT code, date, "
+        "open*adj_factor AS open, high*adj_factor AS high, "
+        "low*adj_factor AS low, close*adj_factor AS close, "
+        "volume, amount, pct_chg "
         "FROM kline_daily WHERE date >= ? ORDER BY code, date", (cutoff,))
     if bars:
         df_all = pd.DataFrame(bars)

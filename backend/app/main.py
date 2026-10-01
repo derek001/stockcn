@@ -46,15 +46,16 @@ def data_incremental():
 
 
 class QmtImportReq(BaseModel):
-    path: str
+    raw_path: str               # 「不复权」导出目录（含 SH/SZ/BJ 的那一层）
+    geo_path: str               # 「等比后复权」导出目录
     mode: str = "full"          # full | incremental
-    force: bool = False         # 跳过「疑似不复权」体检（口径自负的风险由操作者确认）
+    force: bool = False         # 跳过双目录体检（口径风险由操作者确认）
 
 
 @app.post("/api/data/qmt/preview")
 def qmt_preview(body: QmtImportReq):
     try:
-        return updater.preview_local(body.path)
+        return updater.preview_local(body.raw_path, body.geo_path)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -63,8 +64,10 @@ def qmt_preview(body: QmtImportReq):
 def qmt_import(body: QmtImportReq):
     if updater.is_busy():
         raise HTTPException(409, "已有更新任务在运行")
-    if not Path(body.path).is_dir():
-        raise HTTPException(400, f"目录不存在：{body.path}")
+    for label, p in (("不复权", body.raw_path), ("等比后复权", body.geo_path)):
+        # Path("") 会变成当前目录，必须先判空，否则空路径会被当成合法目录
+        if not p.strip() or not Path(p.strip()).is_dir():
+            raise HTTPException(400, f"{label}目录不存在：{p}")
     if body.mode == "full":
         kind = "qmt_full"
     elif body.mode == "incremental":
@@ -74,7 +77,7 @@ def qmt_import(body: QmtImportReq):
         kind = "qmt_incremental"
     else:
         raise HTTPException(400, "mode 需为 full 或 incremental")
-    updater.start_job(kind, body.path, body.force)
+    updater.start_job(kind, (body.raw_path, body.geo_path), body.force)
     return {"ok": True}
 
 
@@ -92,14 +95,23 @@ def stocks(q: str = "", limit: int = 50):
 
 
 @app.get("/api/stocks/{code}/kline")
-def stock_kline(code: str, start: str = "", end: str = "",
+def stock_kline(code: str, start: str = "", end: str = "", adj: str = "raw",
                 indicators: str = Query("ma,macd,boll", description="comma list")):
+    """adj=raw 给交易所口径（与行情软件一致，默认），adj=hfq 给后复权（价格 × 因子）。
+
+    指标跟随所选口径，跟行情软件的行为一致。
+    """
+    if adj not in ("raw", "hfq"):
+        raise HTTPException(400, "adj 只能是 raw 或 hfq")
+    px = ("open, high, low, close" if adj == "raw" else
+          "open*adj_factor AS open, high*adj_factor AS high, "
+          "low*adj_factor AS low, close*adj_factor AS close")
     rows = db.query(
-        "SELECT date,open,high,low,close,volume,amount,pct_chg FROM kline_daily "
+        f"SELECT date,{px},volume,amount,pct_chg,adj_factor FROM kline_daily "
         "WHERE code=? AND (?=='' OR date>=?) AND (?=='' OR date<=?) ORDER BY date",
         (code, start, start, end, end))
     if not rows:
-        raise HTTPException(404, "无K线数据，请先更新数据")
+        raise HTTPException(404, "无K线数据，请先在「数据中心 → K线数据」导入 QMT 导出")
     df = pd.DataFrame(rows)
     want = set(indicators.split(","))
     if "ma" in want:

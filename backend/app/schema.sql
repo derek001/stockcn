@@ -11,11 +11,14 @@ CREATE TABLE IF NOT EXISTS stocks (
   is_active INTEGER DEFAULT 1
 );
 
--- hfq (后复权) daily bars
+-- 日线：价格存**不复权**（交易所口径，与行情软件一致），复权靠 adj_factor 现算
+-- adj_factor = QMT「等比后复权 ÷ 不复权」推导的累计复权因子（上市首日 = 1）
+-- 复权价 = 价格 × adj_factor；pct_chg = 交易所口径涨跌幅（除权日按取整后的参考价计算）
 CREATE TABLE IF NOT EXISTS kline_daily (
   code TEXT NOT NULL,
   date TEXT NOT NULL,
-  open REAL, high REAL, low REAL, close REAL,
+  open REAL, high REAL, low REAL, close REAL,   -- 不复权
+  adj_factor REAL,                              -- 等比累计复权因子
   volume REAL,                      -- shares
   amount REAL,                      -- yuan
   pct_chg REAL,                     -- %

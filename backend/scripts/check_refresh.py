@@ -21,6 +21,8 @@ def snap() -> dict:
         "kline_codes": db.query_one("SELECT COUNT(DISTINCT code) c FROM kline_daily")["c"],
         "kline_sum_close": round(db.query_one(
             "SELECT SUM(close) s FROM kline_daily WHERE date=(SELECT MAX(date) FROM kline_daily)")["s"], 2),
+        "kline_sum_factor": round(db.query_one(
+            "SELECT SUM(adj_factor) s FROM kline_daily WHERE date=(SELECT MAX(date) FROM kline_daily)")["s"], 2),
         "fund_max": db.query_one("SELECT MAX(trade_date) d FROM fundamentals")["d"],
         "fund_n": db.query_one("SELECT COUNT(*) n FROM fundamentals")["n"],
         "idx_max": db.query_one("SELECT MAX(date) d FROM index_kline")["d"],
@@ -60,7 +62,7 @@ while time.time() < deadline:
 after = snap()
 print("after: ", json.dumps(after, ensure_ascii=False), flush=True)
 assert job.get("status") == "done", f"任务未正常结束: {job}"
-for k in ("kline_rows", "kline_max", "kline_codes", "kline_sum_close"):
+for k in ("kline_rows", "kline_max", "kline_codes", "kline_sum_close", "kline_sum_factor"):
     assert after[k] == before[k], f"日线被在线任务改动了：{k} {before[k]} -> {after[k]}"
 assert "kline_source" not in get("/api/data/status"), "data_status 仍在暴露 kline_source"
 print("PASS 日线库一行未动；列表/快照/财报/指数刷新完成", flush=True)

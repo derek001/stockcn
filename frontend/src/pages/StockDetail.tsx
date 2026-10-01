@@ -20,12 +20,13 @@ export default function StockDetail({ code, onBack, onBacktest }:
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState("");
   const [range, setRange] = useState("250");
+  const [adj, setAdj] = useState("raw");
 
   useEffect(() => {
     setD(null);
-    api.get<Detail>(`/api/stocks/${code}/kline?indicators=ma,macd,boll`)
+    api.get<Detail>(`/api/stocks/${code}/kline?adj=${adj}&indicators=ma,macd,boll`)
       .then(setD).catch((e) => setErr(e.message));
-  }, [code]);
+  }, [code, adj]);
 
   if (err) return <div className="panel up">{err}</div>;
   if (!d) return <div className="panel">加载 {code} …</div>;
@@ -57,7 +58,15 @@ export default function StockDetail({ code, onBack, onBacktest }:
       </div>
       <div className="panel">
         <div className="row" style={{ marginBottom: 8 }}>
-          <h3 style={{ margin: 0, flex: 1 }}>日K线（后复权）</h3>
+          <h3 style={{ margin: 0 }}>日K线</h3>
+          <select value={adj} onChange={(e) => setAdj(e.target.value)}>
+            <option value="raw">不复权（交易所口径）</option>
+            <option value="hfq">后复权（不复权 × 复权因子）</option>
+          </select>
+          <span className="muted">
+            {adj === "raw" ? "分红送配的除权日会向下跳空，属正常走势" : "已按等比累计因子抹平除权跳空，适合看长期涨幅"}
+          </span>
+          <span style={{ flex: 1 }} />
           <select value={range} onChange={(e) => setRange(e.target.value)}>
             <option value="120">近半年</option>
             <option value="250">近一年</option>

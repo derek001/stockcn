@@ -22,8 +22,14 @@ def _df_records(df: pd.DataFrame) -> list[dict]:
 
 
 def load_bars(code: str, start: str, end: str) -> pd.DataFrame:
+    """回测用的日线：价格取复权口径（价格 × 因子），量额保持交易所原值。
+
+    回测必须用复权价，否则跨除权日会凭空亏掉一笔分红送转的市值。
+    """
     rows = db.query(
-        "SELECT date, open, high, low, close, volume, amount, pct_chg "
+        "SELECT date, open*adj_factor AS open, high*adj_factor AS high, "
+        "low*adj_factor AS low, close*adj_factor AS close, "
+        "volume, amount, pct_chg "
         "FROM kline_daily WHERE code=? AND date>=? AND date<=? ORDER BY date",
         (code, start, end))
     return pd.DataFrame(rows)
@@ -57,7 +63,7 @@ def synthesize_board_bars(board_code: str | None, industry: str | None,
         return []
     ph = ",".join("?" * len(codes))
     rows = db.query(
-        f"SELECT k.code, k.date, k.close FROM kline_daily k "
+        f"SELECT k.code, k.date, k.close * k.adj_factor AS close FROM kline_daily k "
         f"WHERE k.code IN ({ph}) AND k.date>=? AND k.date<=? ORDER BY k.date",
         (*codes, start, end))
     if not rows:

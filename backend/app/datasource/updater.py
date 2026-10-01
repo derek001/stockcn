@@ -1,11 +1,13 @@
 """Background data jobs: 其它数据刷新 (full / incremental) from the online
-providers, and 日线导入 (qmt_full / qmt_incremental) from a QMT export directory.
+providers, and 日线导入 (qmt_full / qmt_incremental) from two QMT export
+directories: 不复权 + 等比后复权.
 
 The online jobs only maintain the stock list, the fundamentals snapshot, the
 quarterly reports, the industry boards and the market indexes. Individual
 stocks' daily bars are never downloaded online any more: `kline_daily` has
-exactly one writer, the QMT import, so there is no adjusted-price basis to
-reconcile and no way for an online job to mix two vendors' hfq scales.
+exactly one writer, the QMT import, which stores exchange-quoted (unadjusted)
+prices plus one derived adjustment factor per bar — the adjusted price is
+always `price * adj_factor`, never a second copy of the data.
 
 Provider strategy: probe Eastmoney at job start; if its quote servers reject
 us, fall back to Tencent for the whole run.
@@ -38,8 +40,12 @@ def _default_status() -> dict:
         "incremental": _job_state(),
         "local": _job_state(),
         "provider": None,
-        "qmt_path": None,
+        "qmt_path_raw": None,
+        "qmt_path_geo": None,
         "stock_count": 0,
+        # 任务运行中也要能报出上次的行数：不在 base 里的键会被 _norm 丢掉，
+        # 数据中心徽章会在导入那一两分钟里显示成「未导入」
+        "kline_rows": 0,
         "last_full": None,
         "last_incremental": None,
         "last_local": None,
@@ -94,22 +100,27 @@ def is_busy() -> bool:
         return bool(_running)
 
 
-def start_job(kind: str, path: str | None = None, force: bool = False) -> str:
-    """kind: full | incremental | qmt_full | qmt_incremental"""
+def start_job(kind: str, paths: tuple[str, str] | None = None, force: bool = False) -> str:
+    """kind: full | incremental | qmt_full | qmt_incremental
+
+    本地导入任务的 paths 是 (不复权目录, 等比后复权目录)。
+    """
     with _status_lock:
         if kind in _running:
             return "already running"
-        t = threading.Thread(target=_run_job, args=(kind, path, force), daemon=True)
+        t = threading.Thread(target=_run_job, args=(kind, paths, force), daemon=True)
         _running[kind] = t
         t.start()
     return "started"
 
 
-def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
+def _run_job(kind: str, paths: tuple[str, str] | None = None,
+             force: bool = False) -> None:
     try:
         _update(kind, status="running", progress=0, total=0, message="准备中…")
         if kind in LOCAL_KINDS:
-            _job_local(kind, path or "", force)
+            raw, geo = paths or ("", "")
+            _job_local(kind, raw, geo, force)
         else:
             provider = _probe_provider()
             st = _norm(db.kv_get("data_status", _default_status()))
@@ -409,8 +420,8 @@ def _job_incremental(provider: str) -> None:
 # ---------- 本地导入（QMT 导出目录） ----------
 
 _KLINE_INSERT = ("INSERT OR REPLACE INTO kline_daily"
-                 "(code,date,open,high,low,close,volume,amount,pct_chg,turnover) "
-                 "VALUES(?,?,?,?,?,?,?,?,?,?)")
+                 "(code,date,open,high,low,close,adj_factor,volume,amount,pct_chg,turnover) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)")
 
 
 def _universe() -> dict[str, str]:
@@ -430,21 +441,21 @@ def _float_shares() -> dict[str, float]:
 def _bar_row(code: str, b: dict, fs: float | None) -> tuple:
     turnover = round(b["volume"] / fs * 100, 4) if fs else None
     return (code, b["date"], b["open"], b["high"], b["low"], b["close"],
-            b["volume"], b["amount"], b["pct_chg"], turnover)
+            b["adj_factor"], b["volume"], b["amount"], b["pct_chg"], turnover)
 
 
-def _remember_qmt_path(path: str) -> None:
-    """记下最后一次体检通过 / 导入成功的目录，下次打开数据中心直接回填（路径不由代码写死）。"""
+def _remember_qmt_paths(raw: str, geo: str) -> None:
+    """记下最后一次体检通过 / 导入成功的两个目录，下次打开数据中心直接回填（路径不由代码写死）。"""
     st = _norm(db.kv_get("data_status", _default_status()))
-    if st.get("qmt_path") != path:
-        st["qmt_path"] = path
+    if (st.get("qmt_path_raw"), st.get("qmt_path_geo")) != (raw, geo):
+        st["qmt_path_raw"], st["qmt_path_geo"] = raw, geo
         _save_status(st)
 
 
-def preview_local(path: str) -> dict:
-    info = qmt_src.check_dir(path, _universe(), _snapshots())
-    if not info["warning"]:        # 被判「疑似不复权 / 未结算」的目录不值得记住
-        _remember_qmt_path(os.path.abspath(path))
+def preview_local(raw_path: str, geo_path: str) -> dict:
+    info = qmt_src.check_pair(raw_path, geo_path, _universe(), _snapshots())
+    if not info["warning"]:        # 被拦下来的配对不值得记住
+        _remember_qmt_paths(os.path.abspath(raw_path), os.path.abspath(geo_path))
     return info
 
 
@@ -454,17 +465,17 @@ def _snapshots() -> dict[str, dict]:
         "SELECT code, price, amount, trade_date FROM fundamentals") if r["price"]}
 
 
-def _job_local(kind: str, root: str, force: bool = False) -> None:
-    """导入前强制体检：路径选错、导出是不复权，都会污染整个日线库。"""
+def _job_local(kind: str, raw_root: str, geo_root: str, force: bool = False) -> None:
+    """导入前强制双目录体检：路径选错、两份不是同一批次，都会污染整个日线库。"""
     universe = _universe()
-    info = qmt_src.check_dir(root, universe, _snapshots())
+    info = qmt_src.check_pair(raw_root, geo_root, universe, _snapshots())
     if info["warning"] and not force:
-        raise ValueError(info["warning"] + "（确认口径无误可勾选「强制导入」）")
+        raise ValueError(info["warning"] + "（确认无误可勾选「强制导入」）")
     if not info["matched"] or info["matched"] < len(universe) * 0.8:
         raise ValueError(
-            f"目录里只匹配到 {info['matched']}/{len(universe)} 只股票，"
+            f"两个目录里只配对了 {info['matched']}/{len(universe)} 只股票，"
             "疑似路径选错或 QMT 导出尚未完成（不足 80% 覆盖率不允许导入）")
-    files = qmt_src.scan_files(root, universe)
+    files = qmt_src.pair_files(raw_root, geo_root, universe)
     shares = _float_shares()
     if kind == "qmt_full" and info["latest_date"] and not force:
         local_last = db.query_one("SELECT MAX(date) AS d FROM kline_daily")
@@ -485,15 +496,17 @@ def _job_local(kind: str, root: str, force: bool = False) -> None:
     st = _norm(db.kv_get("data_status", _default_status()))
     st["stock_count"] = len(_universe())
     st["kline_rows"] = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")["n"]
-    st["qmt_path"] = os.path.abspath(root)
+    st["qmt_path_raw"] = os.path.abspath(raw_root)
+    st["qmt_path_geo"] = os.path.abspath(geo_root)
     _save_status(st)
 
 
 def _backfill_pct_chg() -> None:
     """最新一根日线的涨跌幅改用在线快照的交易所口径。
 
-    日线是后复权价，复权环比被系统性压缩（详见 datasource/qmt.py），只有末根能拿到
-    当日真实涨跌幅；要求快照交易日与这根日线同日，否则留空而不是写入错日期的数。
+    历史每根的涨跌幅在导入时已经按「不复权收盘价 ÷ 前一日的除权参考价」算好（除权参考价
+    按 0.01 元取整，与交易所算法一致）；末根再用当日收盘后的权威快照覆盖一次，
+    顺带修正停牌股与 QMT 因子推导的边际误差。要求快照交易日与这根同日，否则留空。
     """
     db.execute(
         "UPDATE kline_daily SET pct_chg = "
@@ -521,22 +534,27 @@ def _sync_snapshot_from_klines() -> None:
 
 
 def _local_full(kind: str, files: dict, shares: dict[str, float]) -> None:
-    """先写暂存表再原子换名：任务中断时现有日线库不受影响。"""
+    """先写暂存表再原子换名：任务中断时现有日线库不受影响。
+
+    两个目录（不复权 + 等比后复权）必须在同一个任务里合并成同一行写入，
+    否则第二次导入走同一条换名路径会把第一次写的列整体抹掉。
+    """
     with db.transaction() as conn:
         conn.execute("DROP TABLE IF EXISTS kline_stage")
         conn.execute(
             "CREATE TABLE kline_stage("
             "code TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL,"
-            "volume REAL, amount REAL, pct_chg REAL, turnover REAL, PRIMARY KEY(code,date))")
+            "adj_factor REAL, volume REAL, amount REAL, pct_chg REAL, turnover REAL,"
+            "PRIMARY KEY(code,date))")
     total = len(files)
     done = failed = rows = 0
     batch: list[tuple] = []
     sql = ("INSERT OR IGNORE INTO kline_stage"
-           "(code,date,open,high,low,close,volume,amount,pct_chg,turnover) "
-           "VALUES(?,?,?,?,?,?,?,?,?,?)")
-    for code, path in files.items():
+           "(code,date,open,high,low,close,adj_factor,volume,amount,pct_chg,turnover) "
+           "VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    for code, (raw_p, geo_p) in files.items():
         try:
-            bars = qmt_src.read_bars(path)
+            bars, _stats = qmt_src.read_pair(raw_p, geo_p)
         except Exception:
             failed += 1
             bars = []
@@ -569,9 +587,9 @@ def _local_incremental(kind: str, files: dict, shares: dict[str, float]) -> None
         "SELECT code, MAX(date) AS d FROM kline_daily GROUP BY code")}
     total = len(files)
     done = failed = added = 0
-    for code, path in files.items():
+    for code, (raw_p, geo_p) in files.items():
         try:
-            bars = qmt_src.read_bars(path)
+            bars, _stats = qmt_src.read_pair(raw_p, geo_p)
         except Exception:
             failed += 1
             bars = []
