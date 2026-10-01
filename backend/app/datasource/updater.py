@@ -1,23 +1,21 @@
-"""Background data jobs: 全量更新 (full)、增量更新 (incremental) and 本地导入 (qmt_full /
-qmt_incremental) from a QMT export directory.
+"""Background data jobs: 其它数据刷新 (full / incremental) from the online
+providers, and 日线导入 (qmt_full / qmt_incremental) from a QMT export directory.
+
+The online jobs only maintain the stock list, the fundamentals snapshot, the
+quarterly reports, the industry boards and the market indexes. Individual
+stocks' daily bars are never downloaded online any more: `kline_daily` has
+exactly one writer, the QMT import, so there is no adjusted-price basis to
+reconcile and no way for an online job to mix two vendors' hfq scales.
 
 Provider strategy: probe Eastmoney at job start; if its quote servers reject
-us, fall back to Tencent for the whole run. K-lines are stored as 后复权(hfq)
-bars; incremental updates still detect adjustment-base shifts by comparing
-overlapping bars and rescale the stored history when prices differ.
-
-hfq bases differ between providers, so a database built by one source must not
-be topped up by another: `data_status.kline_source` records which ('remote' or
-'qmt') owns the current bars. On a QMT library the online 增量更新 keeps refreshing
-lists/reports/indexes but skips the K-line pass, and 全量更新 is refused outright.
+us, fall back to Tencent for the whole run.
 """
 from __future__ import annotations
 
 import datetime as dt
+import os
 import threading
-import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .. import db
 from ..datasource import eastmoney as em
@@ -40,7 +38,7 @@ def _default_status() -> dict:
         "incremental": _job_state(),
         "local": _job_state(),
         "provider": None,
-        "kline_source": None,
+        "qmt_path": None,
         "stock_count": 0,
         "last_full": None,
         "last_incremental": None,
@@ -50,6 +48,7 @@ def _default_status() -> dict:
 
 def _norm(st: dict) -> dict:
     base = _default_status()
+    st = {k: v for k, v in st.items() if k in base}   # 丢掉已废弃的历史键
     for k, v in base.items():
         if isinstance(v, dict):
             merged = dict(v)
@@ -78,10 +77,6 @@ def get_status() -> dict:
         row = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
         st["kline_rows"] = row["n"] if row else 0
     return st
-
-
-def kline_source() -> str | None:
-    return _norm(db.kv_get("data_status", _default_status())).get("kline_source")
 
 
 def _save_status(st: dict) -> None:
@@ -115,7 +110,6 @@ def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
         _update(kind, status="running", progress=0, total=0, message="准备中…")
         if kind in LOCAL_KINDS:
             _job_local(kind, path or "", force)
-            source = "qmt"
         else:
             provider = _probe_provider()
             st = _norm(db.kv_get("data_status", _default_status()))
@@ -125,7 +119,6 @@ def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
                 _job_full(provider)
             else:
                 _job_incremental(provider)
-            source = "remote"
         st = _norm(db.kv_get("data_status", _default_status()))
         key = _status_key(kind)
         msg = st[key].get("message", "")
@@ -134,9 +127,6 @@ def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
         now = dt.datetime.now().isoformat(timespec="seconds")
         _update(kind, status="done", message=msg, time=now, final=False)
         st = _norm(db.kv_get("data_status", _default_status()))
-        if kind in LOCAL_KINDS or kind == "full":
-            # 只有真正写过日线才动口径标记：QMT 库上的「增量更新」会跳过K线补齐
-            st["kline_source"] = source
         st[f"last_{key}"] = now
         _save_status(st)
     except Exception as e:
@@ -148,6 +138,10 @@ def _run_job(kind: str, path: str | None = None, force: bool = False) -> None:
 
 
 def _probe_provider() -> str:
+    """东财 push2his 可达就用它（板块/指数历史更全），否则整轮退到腾讯。
+
+    这里只探活，不写任何个股日线：`em.fetch_kline` 同时服务指数K线。
+    """
     try:
         rows = em.fetch_kline("1.600000", beg="20250101", end="20250201")
         if rows:
@@ -358,76 +352,7 @@ def _refresh_financials(kind: str, n_quarters: int) -> None:
             )
 
 
-# ---------- klines ----------
-
-def _upsert_klines(code: str, rows: list[dict]) -> None:
-    # gtimg's hfq series turns negative for a handful of stocks' earliest years,
-    # which makes every indicator on that segment meaningless; not worth storing.
-    rows = [r for r in rows if r["close"] is not None and r["close"] > 0]
-    if not rows:
-        return
-    db.execute(
-        "INSERT OR REPLACE INTO kline_daily(code,date,open,high,low,close,volume,amount,pct_chg,turnover) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
-        many=[(code, r["date"], r["open"], r["high"], r["low"], r["close"],
-               r["volume"], r["amount"], r["pct_chg"], r["turnover"]) for r in rows],
-    )
-
-
-def _fetch_kline_full(provider: str, stock: dict) -> list[dict]:
-    if provider == "em":
-        return em.fetch_kline(stock["secid"])
-    tcode = f"{stock['market'].lower()}{stock['code']}"
-    return tc.fetch_kline(tcode)
-
-
-def _fetch_full_kline(provider: str, stock: dict) -> None:
-    _upsert_klines(stock["code"], _fetch_kline_full(provider, stock))
-
-
-def _covered_codes() -> set[str]:
-    """Stocks that already hold a deep history reaching the newest date locally."""
-    ref = db.query_one("SELECT MAX(date) AS d FROM kline_daily")
-    if not ref or not ref["d"]:
-        return set()
-    cutoff = (dt.date.fromisoformat(ref["d"]) - dt.timedelta(days=7)).isoformat()
-    rows = db.query("SELECT code, COUNT(*) AS n, MAX(date) AS d FROM kline_daily GROUP BY code")
-    return {r["code"] for r in rows if r["d"] >= cutoff and r["n"] >= 200}
-
-
-def _run_kline_pass(kind: str, provider: str, stocks: list[dict], fetch, label: str) -> list[dict]:
-    """Run fetch() over stocks; return the ones that still failed after retries.
-
-    tencent._pace() holds a global cooldown, so a stock that hits the WAF waits
-    the pause out on its next attempt instead of hammering the CDN.
-    """
-    total = len(stocks)
-    if not total:
-        return []
-    _update(kind, progress=0, total=total, message=f"{label} 0/{total}")
-    done = [0]
-    failed: list[dict] = []
-
-    def worker(s: dict) -> bool:
-        for attempt in range(3):
-            try:
-                fetch(provider, s)
-                return True
-            except Exception:
-                time.sleep(1.0 + attempt)
-        return False
-
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futs = {pool.submit(worker, s): s for s in stocks}
-        for f in as_completed(futs):
-            done[0] += 1
-            if not f.result():
-                failed.append(futs[f])
-            if done[0] % 25 == 0 or done[0] == total:
-                _update(kind, progress=done[0], total=total,
-                        message=f"{label} {done[0]}/{total}，失败 {len(failed)}")
-    return failed
-
+# ---------- jobs ----------
 
 def _job_full(provider: str) -> None:
     _refresh_stock_list("full")
@@ -438,65 +363,13 @@ def _job_full(provider: str) -> None:
     # leave 大盘线 trailing the individual stocks by several trading days
     _refresh_indexes(provider)
 
-    stocks = db.query("SELECT code,name,market,secid FROM stocks WHERE is_active=1")
-    covered = _covered_codes()
-    missing = [s for s in stocks if s["code"] not in covered]
-    topped = [s for s in stocks if s["code"] in covered]
-
-    # stocks with usable history only need a windowed top-up, which makes a
-    # re-run after a partial failure resume instead of re-downloading everything
-    f_missing = _run_kline_pass("full", provider, missing, _fetch_full_kline, "下载K线")
-    if f_missing:
-        f_missing = _run_kline_pass("full", provider, f_missing, _fetch_full_kline, "重试K线")
-    f_topped = _run_kline_pass("full", provider, topped, _incremental_stock, "补齐K线")
-    if f_topped:
-        f_topped = _run_kline_pass("full", provider, f_topped, _incremental_stock, "重试补齐K线")
-
-    _refresh_indexes(provider)
-    cnt = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
-    st = db.kv_get("data_status", _default_status())
+    stocks = db.query("SELECT code FROM stocks WHERE is_active=1")
+    st = _norm(db.kv_get("data_status", _default_status()))
     st["stock_count"] = len(stocks)
-    st["kline_rows"] = cnt["n"] if cnt else 0
     _save_status(st)
-
-    n_fail = len(f_missing) + len(f_topped)
-    msg = (f"K线：首次下载 {len(missing) - len(f_missing)} 只，"
-           f"更新 {len(topped) - len(f_topped)} 只")
-    if n_fail:
-        msg += f"，失败 {n_fail} 只（再跑一次全量更新可续传）"
-    _update("full", progress=len(stocks), total=len(stocks), message=msg)
-
-
-def _incremental_stock(provider: str, stock: dict) -> None:
-    code = stock["code"]
-    last = db.query_one("SELECT MAX(date) AS d FROM kline_daily WHERE code=?", (code,))
-    last_date = last["d"] if last else None
-    if not last_date:
-        # incremental only tops up locally-available stocks; full download
-        # belongs to the 全量更新 job
-        return
-    if provider == "em":
-        beg = (dt.date.fromisoformat(last_date) - dt.timedelta(days=45)).strftime("%Y%m%d")
-        new_rows = em.fetch_kline(stock["secid"], beg=beg, end="20500101")
-    else:
-        start = (dt.date.fromisoformat(last_date) - dt.timedelta(days=45)).isoformat()
-        tcode = f"{stock['market'].lower()}{code}"
-        new_rows = tc.fetch_kline_range(tcode, start)
-    if not new_rows:
-        return
-    # windowed fetches lack pct_chg; recompute it from adjacent closes so the
-    # overwrite doesn't blank previously stored values
-    prev_row = db.query_one(
-        "SELECT close FROM kline_daily WHERE code=? AND date<? ORDER BY date DESC LIMIT 1",
-        (code, new_rows[0]["date"]))
-    pc = prev_row["close"] if prev_row else None
-    for r in new_rows:
-        if r["pct_chg"] is None and pc and r["close"] is not None:
-            r["pct_chg"] = round((r["close"] - pc) / pc * 100, 4)
-        pc = r["close"]
-    # hfq prices of old bars never change; overlapping bars may shift after an
-    # ex-rights event, so overwrite everything returned by the windowed fetch.
-    _upsert_klines(code, new_rows)
+    _update("full", progress=1, total=1, final=True,
+            message=f"列表 {len(stocks)} 只 / 财报 12 期 / 指数已刷新；"
+                    "个股日线请改到「K线数据（QMT）」做全量导入")
 
 
 def _refresh_indexes(provider: str) -> None:
@@ -526,20 +399,11 @@ def _job_incremental(provider: str) -> None:
     _refresh_financials("incremental", 2)
     _refresh_indexes(provider)
 
-    if kline_source() == "qmt":
-        # 在线源的复权基准与 QMT 不同，日线交给「增量导入」，这里只刷新列表/财报/指数
-        _update("incremental", progress=1, total=1, final=True,
-                message="日线库为 QMT 导入，已跳过K线补齐（请用「增量导入」更新日线）")
-        return
-
-    stocks = db.query(
-        "SELECT s.code, s.name, s.market, s.secid FROM stocks s "
-        "WHERE s.is_active=1 AND EXISTS(SELECT 1 FROM kline_daily k WHERE k.code = s.code)")
-    failed = _run_kline_pass("incremental", provider, stocks, _incremental_stock, "补齐K线")
-
-    _refresh_indexes(provider)
-    if failed:
-        _update("incremental", message=f"{len(failed)} 只股票K线补齐失败（可稍后重试）")
+    cnt = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
+    rows = cnt["n"] if cnt else 0
+    _update("incremental", progress=1, total=1, final=True,
+            message=f"列表/板块/财报/指数已刷新；日线 {rows} 行未改动，"
+                    "个股日线请在「K线数据（QMT）」做增量导入")
 
 
 # ---------- 本地导入（QMT 导出目录） ----------
@@ -569,8 +433,19 @@ def _bar_row(code: str, b: dict, fs: float | None) -> tuple:
             b["volume"], b["amount"], b["pct_chg"], turnover)
 
 
+def _remember_qmt_path(path: str) -> None:
+    """记下最后一次体检通过 / 导入成功的目录，下次打开数据中心直接回填（路径不由代码写死）。"""
+    st = _norm(db.kv_get("data_status", _default_status()))
+    if st.get("qmt_path") != path:
+        st["qmt_path"] = path
+        _save_status(st)
+
+
 def preview_local(path: str) -> dict:
-    return qmt_src.check_dir(path, _universe(), _snapshots())
+    info = qmt_src.check_dir(path, _universe(), _snapshots())
+    if not info["warning"]:        # 被判「疑似不复权 / 未结算」的目录不值得记住
+        _remember_qmt_path(os.path.abspath(path))
+    return info
 
 
 def _snapshots() -> dict[str, dict]:
@@ -610,6 +485,7 @@ def _job_local(kind: str, root: str, force: bool = False) -> None:
     st = _norm(db.kv_get("data_status", _default_status()))
     st["stock_count"] = len(_universe())
     st["kline_rows"] = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")["n"]
+    st["qmt_path"] = os.path.abspath(root)
     _save_status(st)
 
 

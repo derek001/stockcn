@@ -1,5 +1,7 @@
 """Seed a small sample dataset for development/demo (about 15 well-known stocks).
 
+只灌列表 / 快照 / 财报 / 指数：个股日线一律由数据中心「K线数据（QMT 本地导入）」写入。
+
 Usage: python backend/scripts/seed_sample.py
 """
 import sys
@@ -67,22 +69,10 @@ db.execute("INSERT INTO fundamentals(code,trade_date,price,pct_chg,total_mv,floa
            "pct_chg=excluded.pct_chg,total_mv=excluded.total_mv,float_mv=excluded.float_mv,"
            "pe_ttm=excluded.pe_ttm,pb=excluded.pb", many=frows)
 
-# 2) klines for each sample stock (full history, Tencent)
-total_rows = 0
-for code in found:
-    tcode = f"{em.market_for(code).lower()}{code}"
-    try:
-        rows = tc.fetch_kline(tcode)
-    except Exception as e:
-        print("kline fail", code, str(e)[:80]); continue
-    updater._upsert_klines(code, rows)
-    total_rows += len(rows)
-    print(f"  {code}: {len(rows)} bars {rows[0]['date'] if rows else '-'} .. {rows[-1]['date'] if rows else '-'}")
-
-# 3) indexes
+# 2) indexes
 updater._refresh_indexes("tc")
 
-# 4) financial reports (EM datacenter)
+# 3) financial reports (EM datacenter)
 for q in ["2026-06-30", "2025-12-31", "2025-09-30"]:
     try:
         items = em.fetch_financial_report(q)
@@ -97,7 +87,7 @@ for q in ["2026-06-30", "2025-12-31", "2025-09-30"]:
                    many=items)
     print(f"fin {q}: {len(items)}")
 
-# 5) default pools
+# 4) default pools
 if not db.query("SELECT id FROM pools"):
     for name in ("核心持仓", "观察池", "打板池"):
         db.execute("INSERT INTO pools(name) VALUES(?)", (name,))
@@ -105,6 +95,5 @@ if not db.query("SELECT id FROM pools"):
 st = updater.get_status()
 st["stock_count"] = len(found)
 st["provider"] = "tc"
-st["sample_seeded"] = True
 db.kv_set("data_status", st)
-print("DONE stocks:", len(found), "kline rows:", total_rows)
+print("DONE stocks:", len(found))

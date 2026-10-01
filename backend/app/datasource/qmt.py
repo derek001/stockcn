@@ -55,7 +55,9 @@ def scan_files(root: str, market_of: dict[str, str] | None = None) -> dict[str, 
         raise ValueError(f"目录不存在：{root}")
     entries = _price_files(Path(root))
     if not entries:
-        raise ValueError(f"在 {root} 下未找到 price_XXXXXX.txt 导出文件（应包含 SH/SZ/BJ 子目录）")
+        subs = sorted(p.name for p in Path(root).iterdir() if p.is_dir())
+        hint = f"；该目录下的子目录是 {('、'.join(subs))}，请把路径填到含 SH/SZ/BJ 的那一层" if subs else ""
+        raise ValueError(f"在 {root} 下未找到 price_XXXXXX.txt 导出文件{hint}")
     out: dict[str, Path] = {}
     for mk, p in entries:
         code = _FILE_RE.match(p.name).group(1)
@@ -112,6 +114,14 @@ def read_bars(path: Path) -> list[dict]:
     return bars
 
 
+def _count_markets(codes: list[str], universe: dict[str, str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for c in codes:
+        mk = universe.get(c) or "?"
+        out[mk] = out.get(mk, 0) + 1
+    return dict(sorted(out.items()))
+
+
 def check_dir(root: str, universe: dict[str, str],
               snapshot: dict[str, dict] | None = None) -> dict:
     """导入前的目录体检：覆盖情况 + 复权口径 + 是否收盘结算后导出（只读，不写库）。
@@ -121,12 +131,15 @@ def check_dir(root: str, universe: dict[str, str],
       末根收盘价≈快照价 => 疑似不复权；末根成交额明显低于快照成交额 => 疑似盘中/未结算导出。
     """
     all_files = scan_files(root, universe)
+    missing = sorted(set(universe) - set(all_files))
     res = {
         "path": os.path.abspath(root),
         "files": len(_price_files(Path(root))),
         "matched": len(all_files),
-        "missing": len(universe) - len(all_files),
-        "sample_missing": sorted(set(universe) - set(all_files))[:10],
+        "missing": len(missing),
+        # 完整清单：导入按 stocks 白名单过滤文件，缺谁只能回 QMT 补导出，必须能逐个抄出来
+        "missing_codes": missing,
+        "missing_by_market": _count_markets(missing, universe),
         "latest_date": "",
         "warning": "",
     }

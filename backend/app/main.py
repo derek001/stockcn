@@ -33,10 +33,6 @@ def data_status():
 def data_full():
     if updater.is_busy():
         raise HTTPException(409, "已有更新任务在运行")
-    if updater.kline_source() == "qmt":
-        raise HTTPException(409, "当前日线库来自「本地导入 QMT」，全量更新会把在线源的后复权数据混进"
-                                 "同一只股票的历史，导致价格错位。确需切回在线源：先用 stop.bat 停服，"
-                                 "删除 data/stock.db 里的 kline_daily 表（或直接删除该库文件），再跑全量更新。")
     updater.start_job("full")
     return {"ok": True}
 
@@ -72,9 +68,9 @@ def qmt_import(body: QmtImportReq):
     if body.mode == "full":
         kind = "qmt_full"
     elif body.mode == "incremental":
-        if updater.kline_source() != "qmt":
-            raise HTTPException(409, "当前日线库并非 QMT 导入，请先执行一次「全量导入」"
-                                     "统一复权口径，之后才能增量导入")
+        row = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
+        if not row or not row["n"]:
+            raise HTTPException(409, "日线库还是空的，请先执行一次「全量导入」建库，之后再做增量导入")
         kind = "qmt_incremental"
     else:
         raise HTTPException(400, "mode 需为 full 或 incremental")
