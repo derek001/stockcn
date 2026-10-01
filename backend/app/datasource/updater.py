@@ -605,6 +605,12 @@ def _job_local(kind: str, root: str, force: bool = False) -> None:
         _local_incremental(kind, files, shares)
     _sync_snapshot_from_klines()
     _backfill_pct_chg()
+    # 徽章统计口径统一在任务末尾刷新：跑任务期间 get_status 不会现算 kline_rows，
+    # 不写这里就会一直显示上一次全量更新留下的旧行数
+    st = _norm(db.kv_get("data_status", _default_status()))
+    st["stock_count"] = len(_universe())
+    st["kline_rows"] = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")["n"]
+    _save_status(st)
 
 
 def _backfill_pct_chg() -> None:
@@ -676,9 +682,6 @@ def _local_full(kind: str, files: dict, shares: dict[str, float]) -> None:
         conn.execute("ALTER TABLE kline_stage RENAME TO kline_daily")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_daily(date)")
     db.execute("DROP TABLE IF EXISTS kline_daily_old")
-    st = _norm(db.kv_get("data_status", _default_status()))
-    st["stock_count"] = len(_universe())
-    _save_status(st)
     msg = f"导入 {rows} 行 / {total} 只"
     if failed:
         msg += f"，失败 {failed} 只"
