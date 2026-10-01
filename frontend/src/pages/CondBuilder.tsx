@@ -88,7 +88,8 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
             {hasScore && <th>得分</th>}
             <th>最新价</th><th>涨跌幅</th><th>成交额(亿)</th><th>换手率%</th>
             <th>市值(亿)</th><th>PE(TTM)</th><th>PB</th>
-            <th>ROE</th><th>营收同比</th><th>净利同比</th><th>RSI</th><th className="l">信号</th>
+            <th>ROE</th><th>营收同比</th><th>净利同比</th><th>RSI</th>
+            <th>收盘价日期</th><th className="l">信号</th>
           </tr>
         </thead>
         <tbody>
@@ -115,11 +116,13 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
               <td dangerouslySetInnerHTML={{ __html: fmt.pct(r.revenue_yoy as number) }} />
               <td dangerouslySetInnerHTML={{ __html: fmt.pct(r.net_profit_yoy as number) }} />
               <td>{fmt.n(r.rsi as number)}</td>
+              <td dangerouslySetInnerHTML={{
+                __html: fmt.closeDate(r.trade_date as string, r.kline_date as string) }} />
               <td className="l">{sigs(r)}</td>
             </tr>
           ))}
           {!rows.length && (
-            <tr><td colSpan={17} className="l muted">无匹配结果</td></tr>
+            <tr><td colSpan={18} className="l muted">无匹配结果</td></tr>
           )}
         </tbody>
       </table>

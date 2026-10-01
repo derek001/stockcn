@@ -92,7 +92,11 @@ def load_universe(force: bool = False) -> dict[str, dict]:
     if bars:
         df_all = pd.DataFrame(bars)
         for code, g in df_all.groupby("code", sort=False):
-            if code not in universe or len(g) < 2:
+            if code not in universe:
+                continue
+            # 各股K线末根日期：与快照交易日不一致说明该股停牌或导入缺文件
+            universe[code]["kline_date"] = str(g["date"].iloc[-1])
+            if len(g) < 2:
                 continue
             try:
                 snap = tech_snapshot(compute_all(g))
@@ -185,6 +189,8 @@ def _row(code: str, ctx: dict) -> dict:
         "market": ctx.get("market"),
         "industry": ctx.get("industry"),
         "price": ctx.get("price"),
+        "trade_date": ctx.get("trade_date"),
+        "kline_date": ctx.get("kline_date"),
         "pct_chg": ctx.get("pct_chg"),
         "total_mv": ctx.get("total_mv"),
         "float_mv": ctx.get("float_mv"),

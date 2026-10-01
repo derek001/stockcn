@@ -145,7 +145,8 @@ def pools_list():
     pools = db.query("SELECT id,name,created_at FROM pools ORDER BY id")
     items = db.query(
         "SELECT p.pool_id, s.code, s.name, s.market, s.industry, "
-        "f.price, f.pct_chg, f.pe_ttm, f.pb, f.total_mv "
+        "f.price, f.pct_chg, f.pe_ttm, f.pb, f.total_mv, f.trade_date, "
+        "(SELECT MAX(k.date) FROM kline_daily k WHERE k.code = s.code) AS kline_date "
         "FROM pool_items p JOIN stocks s ON s.code=p.code "
         "LEFT JOIN fundamentals f ON f.code=p.code ORDER BY p.added_at")
     by_pool: dict[int, list] = {p["id"]: [] for p in pools}

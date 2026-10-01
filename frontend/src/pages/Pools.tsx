@@ -4,6 +4,7 @@ import { api, fmt } from "../api";
 interface PoolStock {
   code: string; name: string; market: string; industry: string;
   price: number; pct_chg: number; pe_ttm: number; pb: number; total_mv: number;
+  trade_date: string | null; kline_date: string | null;
 }
 interface Pool { id: number; name: string; stocks: PoolStock[] }
 
@@ -112,7 +113,8 @@ export default function Pools({ onOpenStock }: { onOpenStock: (code: string) => 
             <table>
               <thead><tr>
                 <th className="l">代码</th><th className="l">名称</th><th className="l">行业</th>
-                <th>最新价</th><th>涨跌幅</th><th>PE(TTM)</th><th>总市值</th><th className="l">操作</th>
+                <th>最新价</th><th>涨跌幅</th><th>PE(TTM)</th><th>总市值</th>
+                <th>收盘价日期</th><th className="l">操作</th>
               </tr></thead>
               <tbody>
                 {(active?.stocks ?? []).map((s) => (
@@ -124,6 +126,8 @@ export default function Pools({ onOpenStock }: { onOpenStock: (code: string) => 
                     <td dangerouslySetInnerHTML={{ __html: fmt.pct(s.pct_chg) }} />
                     <td>{fmt.n(s.pe_ttm)}</td>
                     <td>{s.total_mv ? fmt.mv(s.total_mv / 1e8) : "-"}</td>
+                    <td dangerouslySetInnerHTML={{
+                      __html: fmt.closeDate(s.trade_date, s.kline_date) }} />
                     <td className="l">
                       <button className="btn danger" style={{ padding: "2px 8px" }}
                         onClick={(e) => { e.stopPropagation(); removeStock(s.code); }}>移除</button>
@@ -131,7 +135,7 @@ export default function Pools({ onOpenStock }: { onOpenStock: (code: string) => 
                   </tr>
                 ))}
                 {(active?.stocks ?? []).length === 0 && (
-                  <tr><td colSpan={8} className="muted l">股票池为空，请通过搜索或选股功能添加</td></tr>
+                  <tr><td colSpan={9} className="muted l">股票池为空，请通过搜索或选股功能添加</td></tr>
                 )}
               </tbody>
             </table>
