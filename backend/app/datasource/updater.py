@@ -142,7 +142,9 @@ def _run_job(kind: str, paths: tuple[str, str] | None = None,
         _save_status(st)
     except Exception as e:
         traceback.print_exc()
-        _update(kind, status="error", message=f"失败: {e}")
+        # 失败也要盖时间戳：否则徽章上的时间是上一轮的，看不出这次是什么时候挂的
+        _update(kind, status="error", message=f"失败: {e}",
+                time=dt.datetime.now().isoformat(timespec="seconds"))
     finally:
         with _status_lock:
             _running.pop(kind, None)
