@@ -21,6 +21,12 @@ ATTR_FIELDS = [
     "trade_date", "kline_date",
 ]
 
+# 箱体指标在 ctx["box"] 里（只有跑过箱体选股器的命中才有），一并抄进 attrs 留档
+BOX_ATTR_FIELDS = [
+    "box_top", "box_bottom", "box_height", "box_ext_height", "box_pos",
+    "box_slope_3y", "box_cross", "box_time_pct", "box_rebound", "box_dip_60d",
+]
+
 
 def config() -> dict:
     raw = db.kv_get(CONFIG_KEY) or {}
@@ -61,6 +67,8 @@ def run_one(sel, overrides: dict | None = None, persist: bool = True) -> dict:
         attrs = {k: ctx.get(k) for k in ATTR_FIELDS}
         attrs["chg_20d"] = (ctx.get("tech") or {}).get("chg_20d")
         attrs["vol_ratio"] = (ctx.get("tech") or {}).get("vol_ratio")
+        box = ctx.get("box") or {}
+        attrs.update({k: box.get(k) for k in BOX_ATTR_FIELDS})
         rows.append({"code": ctx.get("code") or h["code"],
                      "score": round(float(h.get("score") or 0), 1),
                      "reason": h.get("reason") or "",

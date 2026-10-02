@@ -6,7 +6,7 @@ import time
 
 import pandas as pd
 
-from . import db
+from . import boxrange, db
 from .indicators import compute_all, tech_snapshot
 
 _OP_FN = {
@@ -37,6 +37,21 @@ FUNDAMENTAL_FIELDS = [
     {"field": "gross_margin", "label": "毛利率(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
 ]
 
+# 长箱体（box-range）派生字段：回看 750 个交易日的复权收盘密集带，口径见 boxrange.py 文件头。
+# 「带内占比 box_time_pct」不在这里——箱顶/箱底本身就是「覆盖 80% 交易日的最窄区间」，
+# 所以它恒 ≥80%（2026-10-03 用户确认 B4 撤掉筛选、只当展示列），放进目录会误导。
+BOX_FIELDS = [
+    {"field": "box_height", "label": "箱体高度%(3年密集带)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_ext_height", "label": "3年振幅%(最高/最低收盘)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_pos", "label": "现价在箱体位置%", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_slope_3y", "label": "箱体年化斜率%(3年)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_cross", "label": "收盘穿越箱体中线次数", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_rebound", "label": "现价÷3年最低收盘(倍)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_dip_60d", "label": "近60日挖坑后收回(1是0否)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_years", "label": "上市年限(按首根日线)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_bars", "label": "3年窗口内有效bar数", "type": "number", "ops": [">=", "<="]},
+]
+
 TECHNICAL_FIELDS = [
     {"field": "rsi", "label": "RSI(14)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "macd", "label": "MACD柱", "type": "number", "ops": [">=", "<="]},
@@ -55,7 +70,7 @@ TECHNICAL_FIELDS = [
     {"field": "signal:new_high_250", "label": "创250日新高", "type": "bool"},
     {"field": "signal:new_low_250", "label": "创250日新低", "type": "bool"},
     {"field": "signal:vol_surge", "label": "放量(量比≥2)", "type": "bool"},
-]
+] + BOX_FIELDS
 
 _cache: dict = {"ts": 0.0, "data": None}
 CACHE_TTL = 300  # seconds
@@ -121,6 +136,21 @@ def load_universe(force: bool = False) -> dict[str, dict]:
     return universe
 
 
+def ensure_box(universe: dict[str, dict], look_days: int = boxrange.DEFAULT_LOOK_DAYS,
+               dense_pct: float = boxrange.DEFAULT_DENSE_PCT) -> None:
+    """把箱体指标挂到 ctx["box"] 上——只在条件真的用到箱体时才跑（全市场算一次约 35s）。"""
+    if any(ctx.get("box") for ctx in universe.values()):
+        return
+    bmap = boxrange.compute(look_days, dense_pct)
+    for code, ctx in universe.items():
+        if code in bmap:
+            ctx["box"] = bmap[code]
+
+
+def uses_box(conditions: list[dict]) -> bool:
+    return any(str(c.get("field") or "").startswith("box_") for c in conditions)
+
+
 def eval_condition(ctx: dict, cond: dict) -> bool:
     field = cond.get("field")
     op = cond.get("op", ">=")
@@ -130,9 +160,12 @@ def eval_condition(ctx: dict, cond: dict) -> bool:
     if field.startswith("signal:"):
         sig = (ctx.get("tech") or {}).get("signals") or {}
         return bool(sig.get(field.split(":", 1)[1]))
-    val = ctx.get(field)
-    if field in ("close", "dif", "dea", "rsi", "macd", "vol_ratio", "chg_20d", "chg_60d"):
-        val = (ctx.get("tech") or {}).get(field)
+    if field.startswith("box_"):
+        val = (ctx.get("box") or {}).get(field)
+    else:
+        val = ctx.get(field)
+        if field in ("close", "dif", "dea", "rsi", "macd", "vol_ratio", "chg_20d", "chg_60d"):
+            val = (ctx.get("tech") or {}).get(field)
     fn = _OP_FN.get(op)
     if fn is None or val is None:
         return False
@@ -149,6 +182,8 @@ def eval_condition(ctx: dict, cond: dict) -> bool:
 def screen_all(conditions: list[dict]) -> list[dict]:
     """Manual screening: stock must satisfy ALL conditions."""
     universe = load_universe()
+    if uses_box(conditions):
+        ensure_box(universe)
     out = []
     for code, ctx in universe.items():
         if all(eval_condition(ctx, c) for c in conditions):
@@ -160,6 +195,8 @@ def screen_all(conditions: list[dict]) -> list[dict]:
 def score_groups(groups: list[dict], top_n: int = 100) -> list[dict]:
     """Auto screening: weighted score across condition groups."""
     universe = load_universe()
+    if uses_box([c for g in groups for c in (g.get("conditions") or [])]):
+        ensure_box(universe)
     results = []
     for code, ctx in universe.items():
         total = 0.0
@@ -186,6 +223,7 @@ def score_groups(groups: list[dict], top_n: int = 100) -> list[dict]:
 
 def _row(code: str, ctx: dict) -> dict:
     tech = ctx.get("tech") or {}
+    box = ctx.get("box") or {}
     return {
         "code": code,
         "name": ctx.get("name"),
@@ -207,4 +245,15 @@ def _row(code: str, ctx: dict) -> dict:
         "report_date": ctx.get("report_date"),
         "rsi": tech.get("rsi"),
         "signals": (tech.get("signals") or {}),
+        # 箱体字段只在条件里用到 box_* 时才有值（ensure_box 懒加载），没算过时为 None
+        "box_top": box.get("box_top"),
+        "box_bottom": box.get("box_bottom"),
+        "box_height": box.get("box_height"),
+        "box_ext_height": box.get("box_ext_height"),
+        "box_pos": box.get("box_pos"),
+        "box_slope_3y": box.get("box_slope_3y"),
+        "box_cross": box.get("box_cross"),
+        "box_time_pct": box.get("box_time_pct"),
+        "box_rebound": box.get("box_rebound"),
+        "box_dip_60d": box.get("box_dip_60d"),
     }

@@ -139,6 +139,7 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
       {metas.map((m) => {
         const h = hist[m.id];
         const sel = checked[m.id] ?? new Set<string>();
+        const hasBox = !!h?.rows.some((r) => r.attrs.box_top != null);
         return (
           <div className="panel" key={m.id}>
             <div className="row">
@@ -213,6 +214,11 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                         <th className="l">行业</th><th>得分</th><th className="l">入选理由</th>
                         <th>最新价</th><th>涨跌幅</th><th>流通市值(亿)</th><th>PE(TTM)</th>
                         <th>PB</th><th>ROE%</th><th>净利同比</th><th>量比</th><th>20日涨幅</th>
+                        {hasBox && (<>
+                          <th>箱底(元)</th><th>箱顶(元)</th><th>箱体高度%</th><th>现价位置%</th>
+                          <th>三年斜率%/年</th><th>穿越次数</th><th>带内占比%</th>
+                          <th>现价÷3年最低</th><th>近60日挖坑</th>
+                        </>)}
                       </tr>
                     </thead>
                     <tbody>
@@ -244,10 +250,21 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                           <td>{fmt.n(r.attrs.vol_ratio as number)}</td>
                           <td dangerouslySetInnerHTML={{
                             __html: fmt.pct(r.attrs.chg_20d as number) }} />
+                          {hasBox && (<>
+                            <td>{fmt.n(r.attrs.box_bottom as number)}</td>
+                            <td>{fmt.n(r.attrs.box_top as number)}</td>
+                            <td>{fmt.n(r.attrs.box_height as number, 1)}</td>
+                            <td>{fmt.n(r.attrs.box_pos as number, 1)}</td>
+                            <td>{fmt.n(r.attrs.box_slope_3y as number)}</td>
+                            <td>{fmt.n(r.attrs.box_cross as number, 0)}</td>
+                            <td>{fmt.n(r.attrs.box_time_pct as number, 1)}</td>
+                            <td>{fmt.n(r.attrs.box_rebound as number)}</td>
+                            <td>{r.attrs.box_dip_60d ? "是" : "-"}</td>
+                          </>)}
                         </tr>
                       ))}
                       {!h.rows.length && (
-                        <tr><td colSpan={16} className="l muted">这个日期没有入选的股票</td></tr>
+                        <tr><td colSpan={16 + (hasBox ? 9 : 0)} className="l muted">这个日期没有入选的股票</td></tr>
                       )}
                     </tbody>
                   </table>

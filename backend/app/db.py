@@ -15,6 +15,10 @@ def get_conn() -> sqlite3.Connection:
     if _conn is None:
         _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         _conn.row_factory = sqlite3.Row
+        # 日线库 4.4GB，默认 2000 页缓存 + 临时表落盘会让全市场聚合慢 3~4 倍
+        # （箱体统计实测 135s → 28s），所以把页缓存提到 256MB、排序/临时表放内存。
+        _conn.execute("PRAGMA cache_size=-262144")
+        _conn.execute("PRAGMA temp_store=MEMORY")
         schema = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
         with _lock:
             _conn.executescript(schema)
@@ -44,6 +48,13 @@ def query(sql: str, args: tuple = ()) -> list[dict]:
 def query_one(sql: str, args: tuple = ()):
     rows = query(sql, args)
     return rows[0] if rows else None
+
+
+def query_rows(sql: str, args: tuple = ()) -> list:
+    """只要原始行、不建 dict：几十万行的聚合结果用（dict 版内存和耗时都要翻倍以上）。"""
+    with _lock:
+        cur = get_conn().execute(sql, args)
+        return cur.fetchall()
 
 
 def execute(sql: str, args: tuple = (), many: list | None = None):

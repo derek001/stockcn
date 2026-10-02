@@ -78,6 +78,13 @@ export default function Screener({ onOpenStock }: { onOpenStock: (c: string) => 
           </button>
           <span className="muted">（指标基于本地K线与最新财报快照计算）</span>
         </div>
+        {conds.some((c) => c.field.startsWith("box_")) && (
+          <p className="muted" style={{ marginTop: 6 }}>
+            条件里用到了箱体：第一次点「开始筛选」要等约 35 秒（全市场把 3 年箱体算一遍，
+            之后 5 分钟内再筛就直接用现成的）。箱体上下沿是「80% 交易日挤在最窄价格带」的边界，
+            不是三年最高/最低价，所以「带内占比」恒 ≥80%，只能看不能当条件。
+          </p>
+        )}
         {err && <div className="up">{err}</div>}
       </div>
       {rows && (

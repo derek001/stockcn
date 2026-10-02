@@ -67,6 +67,7 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
   onCheckAll?: (v: boolean) => void;
 }) {
   const hasScore = rows.some((r) => "score" in r);
+  const hasBox = rows.some((r) => r.box_top !== null && r.box_top !== undefined);
   const sigs = (r: Record<string, unknown>) => {
     const s = (r.signals ?? {}) as Record<string, boolean>;
     return Object.entries(s).filter(([, v]) => v).map(([k]) =>
@@ -90,6 +91,10 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
             <th>市值(亿)</th><th>PE(TTM)</th><th>PB</th>
             <th>ROE</th><th>营收同比</th><th>净利同比</th><th>RSI</th>
             <th>收盘价日期</th><th className="l">信号</th>
+            {hasBox && (<>
+              <th>箱底(元)</th><th>箱顶(元)</th><th>箱体高度%</th><th>现价位置%</th>
+              <th>三年斜率%/年</th><th>穿越次数</th><th>带内占比%</th><th>现价÷3年最低</th><th>近60日挖坑</th>
+            </>)}
           </tr>
         </thead>
         <tbody>
@@ -119,10 +124,22 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
               <td dangerouslySetInnerHTML={{
                 __html: fmt.closeDate(r.trade_date as string, r.kline_date as string) }} />
               <td className="l">{sigs(r)}</td>
+              {hasBox && (<>
+                <td>{fmt.n(r.box_bottom as number)}</td>
+                <td>{fmt.n(r.box_top as number)}</td>
+                <td>{fmt.n(r.box_height as number, 1)}</td>
+                <td>{fmt.n(r.box_pos as number, 1)}</td>
+                <td>{fmt.n(r.box_slope_3y as number)}</td>
+                <td>{fmt.n(r.box_cross as number, 0)}</td>
+                <td>{fmt.n(r.box_time_pct as number, 1)}</td>
+                <td>{fmt.n(r.box_rebound as number)}</td>
+                <td>{r.box_dip_60d ? "是" : "-"}</td>
+              </>)}
             </tr>
           ))}
           {!rows.length && (
-            <tr><td colSpan={18} className="l muted">无匹配结果</td></tr>
+            <tr><td colSpan={17 + (hasScore ? 1 : 0) + (selectable ? 1 : 0) + (hasBox ? 9 : 0)}
+              className="l muted">无匹配结果</td></tr>
           )}
         </tbody>
       </table>
