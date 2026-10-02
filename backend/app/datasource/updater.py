@@ -1,4 +1,4 @@
-"""Background data jobs: 基础数据刷新 (full / incremental) from the online
+"""Background data jobs: 在线数据刷新 (full / incremental) from the online
 providers, and 日线导入 (qmt_full / qmt_incremental) from two QMT export
 directories: 不复权 + 等比后复权.
 
@@ -382,7 +382,7 @@ def _job_full(provider: str) -> None:
     _save_status(st)
     _update("full", progress=1, total=1, final=True,
             message=f"列表 {len(stocks)} 只 / 财报 12 期 / 指数已刷新；"
-                    "个股日线请改到「K线数据（QMT）」做全量导入")
+                    "个股日线请改到「数据中心 → 本地数据（QMT 导入）」做全量导入")
 
 
 def _refresh_indexes(provider: str) -> None:
@@ -416,7 +416,7 @@ def _job_incremental(provider: str) -> None:
     rows = cnt["n"] if cnt else 0
     _update("incremental", progress=1, total=1, final=True,
             message=f"列表/板块/财报/指数已刷新；日线 {rows} 行未改动，"
-                    "个股日线请在「K线数据（QMT）」做增量导入")
+                    "个股日线请在「数据中心 → 本地数据（QMT 导入）」做增量导入")
 
 
 # ---------- 本地导入（QMT 导出目录） ----------

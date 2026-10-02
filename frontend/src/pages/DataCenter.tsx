@@ -123,9 +123,9 @@ export default function DataCenter() {
           <span className="badge">股票数: {st.stock_count}</span>
           <span className="badge">K线行数: {rows || "未导入"}</span>
           <span className={rows ? "badge" : "badge up"}>
-            日线: {rows ? "QMT 本地导入" : "未导入，请在下方做一次全量导入"}
+            本地数据: {rows ? "日线已导入" : "未导入，请在下方「本地数据」做一次全量导入"}
           </span>
-          <span className="badge">在线接口: {online}</span>
+          <span className="badge">在线数据: {online}</span>
         </div>
         {pollErr && (
           <p className="up" style={{ margin: "6px 0 0" }}>
@@ -134,14 +134,17 @@ export default function DataCenter() {
         )}
         <p className="muted">
           数据分两块，两块都重要、来源各自独立互不覆盖：
-          <strong>K线数据</strong>（日线，涨跌和复权都靠它）来自本机 QMT 导出的文件；
-          <strong>基础数据</strong>（股票列表、行情快照、财报、板块、指数）来自在线接口。
-          每个交易日收盘后按三步走：① 「基础数据 → 日常刷新」→ ② 在 QMT 把当日日线导成两份 → ③ 回「K线数据 → 增量导入」。
+          <strong>本地数据</strong>是从本机 QMT 导出文件读进来的个股日线，
+          <strong>在线数据</strong>是从公开接口拉的股票列表、行情快照、财报、板块和指数。
+          每个交易日收盘后按三步走：① 「在线数据 → 日常刷新」→ ② 在 QMT 把当日日线导成两份 → ③ 回「本地数据 → 增量导入」。
         </p>
       </div>
 
       <div className="panel">
-        <h3>K线数据（QMT 本地导入）</h3>
+        <h3>本地数据（QMT 导入）</h3>
+        <p className="muted" style={{ marginTop: 0 }}>
+          包含：个股日线（开高低收、成交量/成交额、涨跌幅），覆盖 A 股全部上市公司，只从下面这两个 QMT 目录进库。
+        </p>
         <p className="muted" style={{ marginTop: 0 }}>
           怎么做：① 收盘结算后（建议 18:00 之后）在 QMT「导出数据 → 日线」按市场（SH/SZ/BJ）导出
           <strong>同一天的两份</strong>，一份选<span className="up">「不复权」</span>、一份选<span className="up">「等比后复权」</span>；
@@ -222,10 +225,10 @@ export default function DataCenter() {
       </div>
 
       <div className="panel">
-        <h3>基础数据（在线接口）</h3>
+        <h3>在线数据（公开接口）</h3>
         <p className="muted" style={{ marginTop: 0 }}>
-          这里更新股票列表、最新价/涨跌幅/市值/PE/PB/行业、季度财报、行业板块、大盘指数，
-          <strong>不含个股日线</strong>（日线在上面的 QMT 导入里）。平时点「日常刷新」就够了。
+          包含：股票列表、最新价/涨跌幅/市值/PE/PB/行业的当日快照、最近几个季度的财报、行业板块、大盘指数，
+          <strong>不含个股日线</strong>（日线在上面的「本地数据」里）。平时点「日常刷新」就够了。
         </p>
         <Job label="全量刷新（首次建库）" j={st.full} busy={busy} onStart={() => start("full")} />
         <p className="muted">首次建库用，会把近 12 期财报全部拉一遍，耗时较长。上次完成: {st.last_full ?? "从未"}</p>

@@ -111,7 +111,7 @@ def stock_kline(code: str, start: str = "", end: str = "", adj: str = "raw",
         "WHERE code=? AND (?=='' OR date>=?) AND (?=='' OR date<=?) ORDER BY date",
         (code, start, start, end, end))
     if not rows:
-        raise HTTPException(404, "无K线数据，请先在「数据中心 → K线数据」导入 QMT 导出")
+        raise HTTPException(404, "无K线数据，请先在「数据中心 → 本地数据（QMT 导入）」把 QMT 导出的日线导入")
     df = pd.DataFrame(rows)
     want = set(indicators.split(","))
     if "ma" in want:
