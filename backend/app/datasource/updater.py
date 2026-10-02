@@ -1,4 +1,4 @@
-"""Background data jobs: 其它数据刷新 (full / incremental) from the online
+"""Background data jobs: 基础数据刷新 (full / incremental) from the online
 providers, and 日线导入 (qmt_full / qmt_incremental) from two QMT export
 directories: 不复权 + 等比后复权.
 

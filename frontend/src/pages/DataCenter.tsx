@@ -125,7 +125,7 @@ export default function DataCenter() {
           <span className={rows ? "badge" : "badge up"}>
             日线: {rows ? "QMT 本地导入" : "未导入，请在下方做一次全量导入"}
           </span>
-          <span className="badge">其它数据来源: {online}</span>
+          <span className="badge">在线接口: {online}</span>
         </div>
         {pollErr && (
           <p className="up" style={{ margin: "6px 0 0" }}>
@@ -133,9 +133,10 @@ export default function DataCenter() {
           </p>
         )}
         <p className="muted">
-          数据分两块，来源独立、互不覆盖：<strong>K线（日线）</strong>来自本机 QMT 导出的文件；
-          <strong>其它数据</strong>（股票列表、行情快照、财报、板块、指数）来自在线接口。
-          每个交易日收盘后按三步走：① 下方「其它数据 → 日常刷新」→ ② 在 QMT 把当日日线导成两份 → ③ 回这里「K线数据 → 增量导入」。
+          数据分两块，两块都重要、来源各自独立互不覆盖：
+          <strong>K线数据</strong>（日线，涨跌和复权都靠它）来自本机 QMT 导出的文件；
+          <strong>基础数据</strong>（股票列表、行情快照、财报、板块、指数）来自在线接口。
+          每个交易日收盘后按三步走：① 「基础数据 → 日常刷新」→ ② 在 QMT 把当日日线导成两份 → ③ 回「K线数据 → 增量导入」。
         </p>
       </div>
 
@@ -221,7 +222,7 @@ export default function DataCenter() {
       </div>
 
       <div className="panel">
-        <h3>其它数据（在线）</h3>
+        <h3>基础数据（在线接口）</h3>
         <p className="muted" style={{ marginTop: 0 }}>
           这里更新股票列表、最新价/涨跌幅/市值/PE/PB/行业、季度财报、行业板块、大盘指数，
           <strong>不含个股日线</strong>（日线在上面的 QMT 导入里）。平时点「日常刷新」就够了。
