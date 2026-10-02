@@ -32,6 +32,9 @@ MIN_INTERVAL = float(os.getenv("STOCKCN_HTTP_INTERVAL", "1.0"))
 # first pause after a WAF rejection, doubling up to MAX_BACKOFF
 BLOCK_BACKOFF = float(os.getenv("STOCKCN_BLOCK_BACKOFF", "60"))
 MAX_BACKOFF = 900.0
+# 一次 DNS 抖动 / 连接重置不该打断整轮刷新（全量刷新要跑几十分钟）
+GET_TRIES = int(os.getenv("STOCKCN_HTTP_TRIES", "4"))
+TRANSIENT = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
 
 INDEXES = {
     "sh000001": "上证指数",
@@ -84,8 +87,19 @@ def pause_remaining() -> float:
 
 def _get_text(url: str, params: dict, timeout: int = 20) -> str:
     global _block_streak
-    _pace()
-    r = requests.get(url, params=params, timeout=timeout, headers=HEADERS)
+    host = url.split("/")[2]
+    for attempt in range(GET_TRIES):
+        _pace()
+        try:
+            r = requests.get(url, params=params, timeout=timeout, headers=HEADERS)
+            break
+        except TRANSIENT as e:
+            if attempt == GET_TRIES - 1:
+                raise
+            wait = min(2.0 * (attempt + 1), 8.0)
+            print(f"[tencent] {host} 瞬时网络错误（{type(e).__name__}），"
+                  f"{wait:.0f}s 后重试 {attempt + 1}/{GET_TRIES - 1}", flush=True)
+            time.sleep(wait)
     body = r.text or ""
     if r.status_code in (401, 403, 429, 501) or body.lstrip().startswith("<"):
         _note_block(r.status_code)
