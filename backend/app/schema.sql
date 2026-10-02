@@ -96,3 +96,18 @@ CREATE TABLE IF NOT EXISTS kv_store (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- 策略选股：每次运行的命中留痕。同一天重跑同一个选股器会覆盖，params 存本次生效参数便于复现
+CREATE TABLE IF NOT EXISTS select_result (
+  trade_date TEXT NOT NULL,         -- 数据基准日（这批K线的末根日期）
+  selector_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT,
+  score REAL,                       -- 0..100，只用于排序，不代表概率
+  reason TEXT,
+  attrs TEXT,                       -- JSON：命中当时的展示字段（价格/市值/PE/ROE…），回看历史不会被今日数据覆盖
+  params TEXT,                      -- JSON
+  run_at TEXT NOT NULL,
+  PRIMARY KEY (trade_date, selector_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_select_selector ON select_result(selector_id, trade_date);

@@ -25,7 +25,7 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8610
 
 建库路径：先在「数据中心 → 在线数据（公开接口）」跑一次「全量刷新」拿到股票列表与快照，再在 QMT 里把同一交易日的日线导两份（「不复权」和「等比后复权」），到「数据中心 → 本地数据（QMT 导入）」填两个目录并执行全量导入（实测 5573 只 / 1696 万行约 4 分半，含体检与成交额），详见下方「本地数据：QMT 日线导入」。
 
-## 六大功能
+## 七大功能
 
 | 模块 | 页面 | 说明 |
 |---|---|---|
@@ -33,6 +33,7 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8610
 | 股票自选池 | 股票自选池 | 可增删改名，池内股票可增删（跑过 `seed_sample.py` 时自带 核心持仓/观察池/打板池 三个池，空库则是 0 个，需自己新建）；列表带「收盘价日期」列，便于发现数据异常；点击股票进入个股详情页（K线/指标/财务） |
 | 手动选股 | 手动选股 | 基本面（行业/市值/PE/PB/成交额/换手率/ROE/增速…）与技术面（MACD金叉、布林突破、多头排列、放量…）条件自由组合，须同时满足；结果表同样带「收盘价日期」列（自动选股一致）；结果支持单选/多选/全选加入自选池 |
 | 自动选股 | 自动选股 | 5 个条件框，权重之和必须为 100；框内条件按满足比例计分，加权总分排序取前 100 |
+| 策略选股 | 策略选股 | 内置「低估值真成长 / 趋势放量 / 超跌企稳」三个选股器（条件写死在插件里，页面上只调门槛数值）；每天的名单按日期存进本地库留痕，可回看历史日期、勾选加入自选池；插件放在 `backend/app/selectors/`，新增文件即自动发现 |
 | 交易策略 | 交易策略 | 内置 MACD+MA、双均线、海龟交易法、布林突破、KDJ 五个插件策略；插件放在 `backend/app/strategies/`，新增文件即自动发现；可勾选启用项 |
 | 回测 | 回测 | 股票代码 + 时间范围（默认10年）+ 资金（默认100万）+ 手续费（默认0.0003）+ 已启用策略下拉；生成个股K线（标注买卖点）、大盘指数、行业指数三条曲线，汇总耗时/笔数/扣费盈亏/大盘与行业涨跌，交易明细可导出 Excel |
 
@@ -134,12 +135,73 @@ backend/app/            FastAPI 应用
   datasource/           eastmoney.py / tencent.py / qmt.py(QMT 导出文件解析) / updater.py(在线刷新 + QMT 日线导入任务)
   indicators.py         MA/MACD/BOLL/RSI/KDJ 指标库
   screening.py          手动/自动选股引擎（结果缓存5分钟）
+  selectors/            选股器插件目录（base.py 定义插件接口, builtin.py 内置三个选股器, runner.py 运行与留痕）
   strategies/           策略插件目录（base.py 定义插件接口, builtin.py 内置策略）
   backtest.py           回测引擎 + Excel 导出
 frontend/               React+Vite 源码；dist/ 构建产物由后端直接托管
 data/                   SQLite 数据库（首次运行自动创建）
 .tools/node             便携版 Node（仅用于构建前端，可删除）
 ```
+
+## 策略选股（插件式选股器）
+
+与「手动/自动选股」共用同一份上下文：`screening.load_universe()` 返回每只股票的基本面快照 +
+最近一期财报 + 最近 260 根**复权**日线算出的指标，所以手动选股能用的字段，选股器插件都能用。
+差别在于：选股器把「必须同时满足的条件」写成代码，页面上只暴露门槛数值，并且每次运行都留痕。
+
+内置三个（`backend/app/selectors/builtin.py`，条件都是硬筛，score 只用于排序）：
+
+| 选股器 | 硬条件 | score 构成 |
+|---|---|---|
+| 低估值真成长 `value_quality` | 0<PE(TTM)≤上限、0<PB≤上限、ROE≥下限、净利同比≥下限、流通市值≥下限 | 便宜程度 45 + ROE 30 + 增速 25（各按「达到门槛得一半、达到 2×门槛封顶」折算） |
+| 趋势放量 `trend_volume` | 均线多头排列 + MACD 零轴上方 + 量比≥下限 + 20日涨幅落在区间 + 流通市值≥下限 | 量比 40 + 20日涨幅 30（两项都到下限的 4 倍才封顶）+ 收盘高于MA20 幅度 30（高于 10% 封顶） |
+| 超跌企稳 `oversold_rebound` | 60日跌幅≥深度、RSI≤上限、收盘重新站上 MA20、流通市值≥下限 | 跌幅深度 40 + RSI 低位 30 + 站回 MA20 幅度 30 |
+
+三个都会自动剔除：名称含 ST/退 的股票；没有日线或**最后一根日线日期与快照交易日不同日**的股票
+（停牌、或本地导入缺文件）。所以「今天筛不出票」先去数据中心补当日日线。
+
+留痕与配置：
+
+- 表 `select_result`，主键 `(trade_date, selector_id, code)`。同一天重跑同一个选股器整批覆盖，
+  **0 命中也会把当天该选股器的旧名单清空**（诚实反映「这次一只都没选出」）；换参数重跑同样覆盖，
+  历史行里存的是当次参数。
+- `trade_date` 取这批股票里最新的末根日线日期，不是系统当天 —— 休市日跑就落在最后一个交易日。
+- 每行把命中当时的展示字段抄进 `attrs`（名称/行业/价格/市值/PE/PB/ROE/量比/20日涨幅…），
+  隔天回看历史日期不会被今日行情改掉；`run_at` 是运行时刻。
+- 启用项与参数存在 `kv_store` 的 `selector_config`；没有该键时视为全部启用。参数越界或非数字，
+  接口直接返回 400，页面原样显示是哪一项、允许区间是多少。
+- 接口：`GET /api/selectors`、`PUT /api/selectors/config`、`POST /api/selectors/run`
+  （带 `selector_id` 跑一个，留空跑全部启用的）、`GET /api/selectors/results?selector_id=&date=`。
+
+自己写一个选股器：在 `backend/app/selectors/` 新建 `my_pick.py`，重启服务后自动出现在页面上。
+
+```python
+from .base import Selector, num, signal, tradable
+
+class MyPickSelector(Selector):
+    id = "my_pick"
+    name = "我的选股器"
+    description = "一句话说明筛的是什么样的票"
+    params_schema = [{"key": "mv_min", "label": "流通市值 下限(亿)",
+                      "type": "number", "default": 50, "min": 0, "max": 5000}]
+
+    def select(self, universe, params):        # universe 即 load_universe() 的结果
+        out = []
+        for code, ctx in universe.items():
+            if not tradable(ctx):              # 剔除 ST/退、当日无新K线
+                continue
+            if not signal(ctx, "ma_bullish"):  # 技术面信号
+                continue
+            mv = num(ctx, "float_mv")          # 指标类字段也走 num(ctx, "close"/"rsi"/…)
+            if mv is None or mv < params["mv_min"]:
+                continue
+            out.append({"code": code, "score": 50.0, "reason": f"流通市值 {mv:.0f}亿"})
+        return out
+```
+
+想复刻视频/文章里的选股条件时，注意库里**没有**这些数据：龙虎榜、北向资金、概念题材（只有行业板块）、
+股东户数、涨停/连板天数（可由 `pct_chg` 推但没有单独存列）、期货期权与港股。涉及这些的规则要么先补数据源，
+要么换成近似条件（例如用「量比≥2 + 20日涨幅」代替「资金持续流入」）。
 
 ## 编写自己的策略插件
 

@@ -15,6 +15,7 @@ from . import db, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
+from .selectors import runner as sel_runner
 from .strategies import discover
 
 app = FastAPI(title="A股分析终端")
@@ -263,6 +264,61 @@ def strategies_enable(body: StrategyToggle):
     valid = set(discover().keys())
     db.kv_set("enabled_strategies", [s for s in body.enabled if s in valid])
     return {"ok": True}
+
+
+# ---------------- selectors (策略选股) ----------------
+
+@app.get("/api/selectors")
+def selectors_list():
+    return sel_runner.list_meta()
+
+
+class SelectorConfig(BaseModel):
+    enabled: list[str]
+    params: dict[str, dict] = {}
+
+
+@app.put("/api/selectors/config")
+def selectors_config(body: SelectorConfig):
+    registry = sel_runner.discover()
+    for sid, raw in (body.params or {}).items():
+        sel = registry.get(sid)
+        if sel is None:
+            raise HTTPException(400, f"没有这个选股器：{sid}")
+        try:
+            sel_runner.resolve_params(sel.params_schema, raw)
+        except ValueError as e:
+            raise HTTPException(400, f"{sel.name}：{e}") from e
+    sel_runner.save_config(body.enabled, body.params)
+    return {"ok": True}
+
+
+class SelectorRun(BaseModel):
+    selector_id: str = ""
+    params: dict = {}
+
+
+@app.post("/api/selectors/run")
+def selectors_run(body: SelectorRun):
+    """跑一个（给了 selector_id）或跑全部启用的选股器，结果写进 select_result 留痕。"""
+    try:
+        if body.selector_id:
+            sel = sel_runner.discover().get(body.selector_id)
+            if sel is None:
+                raise HTTPException(400, f"没有这个选股器：{body.selector_id}")
+            return {"runs": [sel_runner.run_one(sel, body.params)]}
+        return {"runs": sel_runner.run_all()}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/selectors/results")
+def selectors_results(selector_id: str = Query(...), date: str = ""):
+    if selector_id not in sel_runner.discover():
+        raise HTTPException(400, f"没有这个选股器：{selector_id}")
+    got = sel_runner.load(selector_id, date)
+    got["dates"] = sel_runner.dates(selector_id)
+    return got
 
 
 # ---------------- backtest ----------------

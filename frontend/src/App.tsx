@@ -4,6 +4,7 @@ import Pools from "./pages/Pools";
 import StockDetail from "./pages/StockDetail";
 import Screener from "./pages/Screener";
 import AutoScreener from "./pages/AutoScreener";
+import Selectors from "./pages/Selectors";
 import Strategies from "./pages/Strategies";
 import Backtest from "./pages/Backtest";
 
@@ -13,6 +14,7 @@ type View =
   | { page: "stock"; code: string }
   | { page: "manual" }
   | { page: "auto" }
+  | { page: "selector" }
   | { page: "strategies" }
   | { page: "backtest"; code?: string };
 
@@ -21,6 +23,7 @@ const NAV: { key: View["page"]; label: string }[] = [
   { key: "pools", label: "股票自选池" },
   { key: "manual", label: "手动选股" },
   { key: "auto", label: "自动选股" },
+  { key: "selector", label: "策略选股" },
   { key: "strategies", label: "交易策略" },
   { key: "backtest", label: "回测" },
 ];
@@ -57,6 +60,7 @@ export default function App() {
         )}
         {view.page === "manual" && <Screener onOpenStock={(c) => setView({ page: "stock", code: c })} />}
         {view.page === "auto" && <AutoScreener onOpenStock={(c) => setView({ page: "stock", code: c })} />}
+        {view.page === "selector" && <Selectors onOpenStock={(c) => setView({ page: "stock", code: c })} />}
         {view.page === "strategies" && <Strategies />}
         {view.page === "backtest" && <Backtest initialCode={view.code} />}
       </div>
