@@ -312,48 +312,48 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
                for b in bars if b["date"] in gmap):
             vol_mismatch += 1
 
+    # 下面这些提示会原样显示在数据中心页面上，写给操作员看：说清「哪份导错了 + 回 QMT 怎么选」，
+    # 复权因子一类的实现细节留在 README，不要出现在这里。
     if price_seen and price_aligned / price_seen < 0.7:
         warns.append(
-            f"抽检 {price_seen} 只：只有 {price_aligned} 只「不复权」末根收盘价与最新快照价吻合，"
-            "该目录疑似不是不复权导出。请在 QMT 导出时选「不复权」。")
+            f"抽了 {price_seen} 只股票，只有 {price_aligned} 只的不复权最新收盘价和实时行情一致，"
+            "「不复权」目录疑似导成了复权价。请在 QMT 重导，复权方式选「不复权」。")
     if geo_seen and geo_same / geo_seen > 0.7:
         warns.append(
-            f"抽检 {geo_seen} 只：{geo_same} 只两份导出的末根收盘价一致，"
-            "「等比后复权」目录看起来导的也是不复权。请在 QMT 里另导一份选「等比后复权」。")
+            f"抽了 {geo_seen} 只股票，有 {geo_same} 只的两份最新收盘价完全一样，"
+            "「等比后复权」目录其实导的也是不复权。请在 QMT 另导一份，复权方式选「等比后复权」。")
     if res["raw_latest"] and res["geo_latest"] and res["raw_latest"] != res["geo_latest"]:
         warns.append(
-            f"两份导出截止日不一致：不复权 {res['raw_latest']} / 等比后复权 {res['geo_latest']}，"
-            "请按同一交易日重新导出。")
+            f"两份导出不是同一天：不复权到 {res['raw_latest']}，等比后复权到 {res['geo_latest']}。"
+            "请在 QMT 把这两份按同一个交易日重导。")
     if vol_mismatch:
         warns.append(
-            f"抽检 {f_rows} 只：{vol_mismatch} 只的成交量/成交额在两份导出里对不上，"
-            "说明不是同一批次导出，请一起重新导出。")
+            f"{vol_mismatch} 只股票的成交量/成交额在两份里对不上，说明不是同一次导出的。"
+            "请把这两份一起重导。")
     if amt_seen >= 10:
         amt_ratios.sort()
         median = amt_ratios[len(amt_ratios) // 2]
         if median < 0.9:
-            low = sum(1 for r in amt_ratios if r < 0.9)
             warns.append(
-                f"抽检 {amt_seen} 只：末根成交额只有收盘快照的 {median:.0%}（{low} 只偏低），"
-                "疑似盘中或当日数据尚未结算时导出。这样的末根只有半天量额，"
-                "请改在收盘结算后（建议 18:00 之后）重新导出再导入。")
+                f"最新一天的成交额只有收盘后的 {median:.0%}，疑似盘中或当日未结算时导的（当天那根只有半天量额）。"
+                "请等收盘结算完成后（建议 18:00 之后）重导这两份。")
     if f_first_bad:
         warns.append(
-            f"抽检 {f_rows} 只：{f_first_bad} 只首日复权因子远小于 1，"
-            "等比后复权以上市日为基准、因子只可能 ≥1，疑似选成了「前复权 / 等比前复权」。")
+            f"{f_first_bad} 只股票的复权系数远小于 1，这是「前复权 / 等比前复权」的特征。"
+            "请在 QMT 改选「等比后复权」。")
     if f_nonmono:
         warns.append(
-            f"抽检 {f_rows} 只：{f_nonmono} 只的复权因子明显回退，"
-            "两份导出的复权口径对不上（等比后复权的因子只会随分红送转累积上升）。")
+            f"{f_nonmono} 只股票的复权系数出现回退，两份的复权口径不匹配。"
+            "请把这两份一起重导，并确认选的是「不复权」+「等比后复权」。")
     # QMT 自己的四价偶发无法被单一因子整除到分（实测约占行数 0.05%），只有大面积出现才是口径问题
     if f_bars and f_unres / f_bars > 0.01:
         warns.append(
-            f"抽检 {f_rows} 只：{f_unres}/{f_bars} 行无法用一个分段常数因子把等比价格复现到分，"
-            "两份导出可能来自不同的行情源或不同的除权规则版本。")
+            f"{f_unres}/{f_bars} 行的等比价按不复权价算不出来，两份可能来自不同行情源或不同的除权规则版本。"
+            "请在 QMT 一次性重导这两份。")
     if date_mismatch:
         warns.append(
-            f"抽检 {f_rows} 只：{date_mismatch} 只的两份导出末根日期不一致"
-            f"（共 {f_no_geo} 行只在不复权目录里有），两份导出不完整对应，请一起重新导出。")
+            f"{date_mismatch} 只股票的两份最新一天日期不同（{f_no_geo} 行只在不复权目录里有），"
+            "两份不完整对应，请一起重导。")
     res["unmatched_rows"] = f_no_geo
     res["sample_stocks"] = f_rows
     res["factor_events"] = f_events
