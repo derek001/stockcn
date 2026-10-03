@@ -138,7 +138,7 @@ def load_universe(force: bool = False) -> dict[str, dict]:
 
 def ensure_box(universe: dict[str, dict], look_days: int = boxrange.DEFAULT_LOOK_DAYS,
                dense_pct: float = boxrange.DEFAULT_DENSE_PCT) -> None:
-    """把箱体指标挂到 ctx["box"] 上——只在条件真的用到箱体时才跑（全市场算一次约 35s）。"""
+    """把箱体指标挂到 ctx["box"] 上——只在条件真的用到箱体时才跑（全市场算一次 33~47s，之后命中内存缓存秒回）。"""
     if any(ctx.get("box") for ctx in universe.values()):
         return
     bmap = boxrange.compute(look_days, dense_pct)
