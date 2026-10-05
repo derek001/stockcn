@@ -1,4 +1,5 @@
-"""Run 日常刷新 against the live server and assert it never touches kline_daily.
+"""Run 日常刷新 against the live server and assert it never touches kline_daily
+but does fill every stock's list_date.
 
 Usage: python backend/scripts/check_refresh.py [base_url]
 """
@@ -29,6 +30,8 @@ def snap() -> dict:
         "idx_codes": db.query_one("SELECT COUNT(DISTINCT index_code) c FROM index_kline")["c"],
         "fin_rows": db.query_one("SELECT COUNT(*) n FROM fin_report")["n"],
         "stock_n": db.query_one("SELECT COUNT(*) n FROM stocks WHERE is_active=1")["n"],
+        "list_date_n": db.query_one(
+            "SELECT COUNT(*) n FROM stocks WHERE list_date IS NOT NULL")["n"],
     }
 
 
@@ -65,4 +68,9 @@ assert job.get("status") == "done", f"任务未正常结束: {job}"
 for k in ("kline_rows", "kline_max", "kline_codes", "kline_sum_close", "kline_sum_factor"):
     assert after[k] == before[k], f"日线被在线任务改动了：{k} {before[k]} -> {after[k]}"
 assert "kline_source" not in get("/api/data/status"), "data_status 仍在暴露 kline_source"
-print("PASS 日线库一行未动；列表/快照/财报/指数刷新完成", flush=True)
+assert after["list_date_n"] >= before["list_date_n"], \
+    f"上市日期被在线任务抹掉了：{before['list_date_n']} -> {after['list_date_n']}"
+assert after["list_date_n"] >= after["stock_n"] - 20, \
+    f"上市日期覆盖不足：{after['list_date_n']}/{after['stock_n']}（只应缺最新几只还没披露上市日的新股）"
+print(f"PASS 日线库一行未动；列表/快照/财报/指数刷新完成；上市日期覆盖 "
+      f"{after['list_date_n']}/{after['stock_n']}", flush=True)

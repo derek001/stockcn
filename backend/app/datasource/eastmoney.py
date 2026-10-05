@@ -267,3 +267,37 @@ def fetch_stock_roster(report_dates: list[str]) -> list[dict]:
                 break
             pn += 1
     return list(out.values())
+
+
+LISTING_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,LISTING_DATE"
+
+
+def fetch_listing_dates() -> dict[str, str]:
+    """code -> 上市日期（YYYY-MM-DD），来自 F10 公司概况 RPT_F10_ORG_BASICINFO。
+
+    push2 的全市场快照也带上市日期（f26），但那台服务器在本机是连接级封锁；
+    datacenter 这台可达，翻 17 页拿到全部 A 股（约 8300 条，含已退市与未上市申报股）。
+    答不出日期的股票不进结果，调用方因此不会把已有值抹成空。
+    """
+    out: dict[str, str] = {}
+    pn = 1
+    while True:
+        js = _get_json(DATACENTER, {
+            "reportName": "RPT_F10_ORG_BASICINFO", "columns": LISTING_COLUMNS,
+            "filter": f'(SECURITY_TYPE_CODE="{TYPE_CODE_ASHARE}")',
+            "pageNumber": pn, "pageSize": 500,
+            "sortColumns": "SECURITY_CODE", "sortTypes": "1",
+        })
+        result = (js or {}).get("result") or {}
+        items = result.get("data") or []
+        if not items:
+            break
+        for it in items:
+            code = str(it.get("SECURITY_CODE") or "")
+            date = str(it.get("LISTING_DATE") or "")[:10]
+            if len(code) == 6 and code.isdigit() and len(date) == 10:
+                out[code] = date
+        if pn >= int(result.get("pages") or 1):
+            break
+        pn += 1
+    return out

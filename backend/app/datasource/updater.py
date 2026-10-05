@@ -176,6 +176,11 @@ _STOCK_UPSERT = (
     "board_code=COALESCE(excluded.board_code, stocks.board_code), "
     "list_date=COALESCE(excluded.list_date, stocks.list_date), is_active=1")
 
+# 上市日期是独立补录的一列：只覆盖接口给了值的行，空值绝不写回
+_LIST_DATE_UPDATE = (
+    "UPDATE stocks SET list_date=:list_date "
+    "WHERE code=:code AND (list_date IS NULL OR list_date<>:list_date)")
+
 _FUND_UPSERT = (
     "INSERT INTO fundamentals(code,trade_date,price,pct_chg,total_mv,float_mv,"
     "pe_dynamic,pe_ttm,pb,turnover_rate,amount) "
@@ -252,10 +257,30 @@ def _refresh_stock_list(kind: str) -> None:
                    "board_type": "industry"} for b in boards],
         )
     _supplement_missing_stocks(kind)
+    _refresh_listing_dates(kind)
     # 补录后才是真实在册数：主列表分支早写会漏掉补进来的科创板/北交所
     st = db.kv_get("data_status", _default_status())
     st["stock_count"] = len(_universe())
     _save_status(st)
+
+
+def _refresh_listing_dates(kind: str) -> int:
+    """把每只股票的上市日期写进 stocks.list_date（腾讯板块列表和财报花名册都不带这列）。
+
+    只写接口给了值的代码；上市日期不可变，接口若给了不同的日期就以接口为准覆盖。
+    """
+    _update(kind, message="更新上市日期…")
+    try:
+        dates = em.fetch_listing_dates()
+    except Exception:
+        return 0
+    if dates:
+        db.execute(_LIST_DATE_UPDATE,
+                   many=[{"code": c, "list_date": d} for c, d in dates.items()])
+    n = db.query_one("SELECT COUNT(*) AS n FROM stocks WHERE list_date IS NOT NULL")["n"]
+    total = db.query_one("SELECT COUNT(*) AS n FROM stocks")["n"]
+    _update(kind, message=f"上市日期已入库 {n}/{total} 只")
+    return n
 
 
 def _supplement_missing_stocks(kind: str) -> int:
@@ -381,7 +406,7 @@ def _job_full(provider: str) -> None:
     st["stock_count"] = len(stocks)
     _save_status(st)
     _update("full", progress=1, total=1, final=True,
-            message=f"列表 {len(stocks)} 只 / 财报 12 期 / 指数已刷新；"
+            message=f"列表 {len(stocks)} 只（含上市日期）/ 财报 12 期 / 指数已刷新；"
                     "个股日线请改到「数据中心 → 本地数据（QMT 导入）」做全量导入")
 
 
@@ -415,7 +440,8 @@ def _job_incremental(provider: str) -> None:
     cnt = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
     rows = cnt["n"] if cnt else 0
     _update("incremental", progress=1, total=1, final=True,
-            message=f"列表/板块/财报/指数已刷新；日线 {rows} 行未改动，"
+            message="列表（含上市日期）/板块/财报/指数已刷新；"
+                    f"日线 {rows} 行未改动，"
                     "个股日线请在「数据中心 → 本地数据（QMT 导入）」做增量导入")
 
 

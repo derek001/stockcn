@@ -227,7 +227,7 @@ export default function DataCenter() {
       <div className="panel">
         <h3>在线数据（公开接口）</h3>
         <p className="muted" style={{ marginTop: 0 }}>
-          包含：股票列表、最新价/涨跌幅/市值/PE/PB/行业的当日快照、最近几个季度的财报、行业板块、大盘指数，
+          包含：股票列表（含每只的上市日期，个股页可看）、最新价/涨跌幅/市值/PE/PB/行业的当日快照、最近几个季度的财报、行业板块、大盘指数，
           <strong>不含个股日线</strong>（日线在上面的「本地数据」里）。平时点「日常刷新」就够了。
         </p>
         <Job label="全量刷新（首次建库）" j={st.full} busy={busy} onStart={() => start("full")} />
