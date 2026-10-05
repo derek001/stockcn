@@ -1,10 +1,30 @@
-"""Built-in strategies (each is a plugin: subclass Strategy with an `id`)."""
+"""Built-in strategies (each is a plugin: subclass Strategy with an `id`).
+
+信号一律用布尔掩码向量化算，不要逐根 `.iloc` 循环：全市场跑批每只都要走完一遍K线，
+循环版实测 0.22s/只（5545 只 ≈ 20 分钟），掩码版能把这段压到毫秒级。
+逐根循环那份留在 `.tmp-sph/legacy_builtin.py` 当交叉核对的参考实现。
+"""
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ..indicators import add_boll, add_kdj, add_ma, add_macd
 from .base import Strategy
+
+
+def _signals(dates: pd.Series, buy: np.ndarray, sell: np.ndarray,
+             buy_reason: str, sell_reason: str) -> list[dict]:
+    act = np.zeros(len(buy), dtype=np.int8)
+    act[sell] = -1
+    act[buy] = 1  # 同日既像买又像卖时买优先，与原来 if 买 / elif 卖 的写法一致
+    vals = dates.to_numpy()
+    out = []
+    for i in np.flatnonzero(act):
+        is_buy = act[i] == 1
+        out.append({"date": vals[i], "side": "buy" if is_buy else "sell",
+                    "reason": buy_reason if is_buy else sell_reason})
+    return out
 
 
 class MacdMaStrategy(Strategy):
@@ -18,21 +38,12 @@ class MacdMaStrategy(Strategy):
     def generate_signals(self, df: pd.DataFrame, params: dict) -> list[dict]:
         ma_w = int(params.get("ma", 20))
         d = add_macd(add_ma(df, windows=(ma_w,)))
-        out = []
-        for i in range(1, len(d)):
-            if pd.isna(d["ma" + str(ma_w)].iloc[i]) or pd.isna(d["dif"].iloc[i - 1]):
-                continue
-            cross_up = d["dif"].iloc[i] > d["dea"].iloc[i] and \
-                d["dif"].iloc[i - 1] <= d["dea"].iloc[i - 1]
-            cross_dn = d["dif"].iloc[i] < d["dea"].iloc[i] and \
-                d["dif"].iloc[i - 1] >= d["dea"].iloc[i - 1]
-            if cross_up and d["close"].iloc[i] > d["ma" + str(ma_w)].iloc[i]:
-                out.append({"date": d["date"].iloc[i], "side": "buy",
-                            "reason": "MACD金叉且站上MA%d" % ma_w})
-            elif cross_dn:
-                out.append({"date": d["date"].iloc[i], "side": "sell",
-                            "reason": "MACD死叉"})
-        return out
+        ma, dif, dea, close = d[f"ma{ma_w}"], d["dif"], d["dea"], d["close"]
+        ok = ma.notna() & dif.shift().notna()
+        buy = ((dif > dea) & (dif.shift() <= dea.shift()) & (close > ma) & ok).to_numpy()
+        sell = ((dif < dea) & (dif.shift() >= dea.shift()) & ok).to_numpy()
+        return _signals(d["date"], buy, sell,
+                        "MACD金叉且站上MA%d" % ma_w, "MACD死叉")
 
 
 class DualMaStrategy(Strategy):
@@ -47,18 +58,12 @@ class DualMaStrategy(Strategy):
     def generate_signals(self, df: pd.DataFrame, params: dict) -> list[dict]:
         fast, slow = int(params.get("fast", 5)), int(params.get("slow", 20))
         d = add_ma(df, windows=(fast, slow))
-        f, s = f"ma{fast}", f"ma{slow}"
-        out = []
-        for i in range(1, len(d)):
-            if pd.isna(d[f].iloc[i - 1]) or pd.isna(d[s].iloc[i - 1]):
-                continue
-            if d[f].iloc[i] > d[s].iloc[i] and d[f].iloc[i - 1] <= d[s].iloc[i - 1]:
-                out.append({"date": d["date"].iloc[i], "side": "buy",
-                            "reason": f"MA{fast}上穿MA{slow}"})
-            elif d[f].iloc[i] < d[s].iloc[i] and d[f].iloc[i - 1] >= d[s].iloc[i - 1]:
-                out.append({"date": d["date"].iloc[i], "side": "sell",
-                            "reason": f"MA{fast}下穿MA{slow}"})
-        return out
+        f, s = d[f"ma{fast}"], d[f"ma{slow}"]
+        ok = f.shift().notna() & s.shift().notna()
+        buy = ((f > s) & (f.shift() <= s.shift()) & ok).to_numpy()
+        sell = ((f < s) & (f.shift() >= s.shift()) & ok).to_numpy()
+        return _signals(d["date"], buy, sell,
+                        f"MA{fast}上穿MA{slow}", f"MA{fast}下穿MA{slow}")
 
 
 class TurtleStrategy(Strategy):
@@ -74,17 +79,11 @@ class TurtleStrategy(Strategy):
         entry, ex = int(params.get("entry", 20)), int(params.get("exit", 10))
         hi = df["high"].rolling(entry).max().shift(1)
         lo = df["low"].rolling(ex).min().shift(1)
-        out = []
-        for i in range(1, len(df)):
-            if pd.isna(hi.iloc[i]) or pd.isna(lo.iloc[i]):
-                continue
-            if df["close"].iloc[i] > hi.iloc[i]:
-                out.append({"date": df["date"].iloc[i], "side": "buy",
-                            "reason": f"突破{entry}日新高"})
-            elif df["close"].iloc[i] < lo.iloc[i]:
-                out.append({"date": df["date"].iloc[i], "side": "sell",
-                            "reason": f"跌破{ex}日新低"})
-        return out
+        ok = hi.notna() & lo.notna()
+        buy = ((df["close"] > hi) & ok).to_numpy()
+        sell = ((df["close"] < lo) & ok).to_numpy()
+        return _signals(df["date"], buy, sell,
+                        f"突破{entry}日新高", f"跌破{ex}日新低")
 
 
 class BollBreakStrategy(Strategy):
@@ -98,18 +97,15 @@ class BollBreakStrategy(Strategy):
     def generate_signals(self, df: pd.DataFrame, params: dict) -> list[dict]:
         w = int(params.get("window", 20))
         d = add_boll(df, window=w)
-        out = []
-        for i in range(1, len(d)):
-            if pd.isna(d["boll_up"].iloc[i]):
-                continue
-            prev_above = not pd.isna(d["boll_up"].iloc[i - 1]) and \
-                d["close"].iloc[i - 1] > d["boll_up"].iloc[i - 1]
-            if d["close"].iloc[i] > d["boll_up"].iloc[i] and not prev_above:
-                out.append({"date": d["date"].iloc[i], "side": "buy", "reason": "突破布林上轨"})
-            elif d["close"].iloc[i] < d["boll_mid"].iloc[i] and \
-                 d["close"].iloc[i - 1] >= (d["boll_mid"].iloc[i - 1] if not pd.isna(d["boll_mid"].iloc[i - 1]) else float("inf")):
-                out.append({"date": d["date"].iloc[i], "side": "sell", "reason": "跌破布林中轨"})
-        return out
+        up, mid, close = d["boll_up"], d["boll_mid"], d["close"]
+        prev_up, prev_mid, prev_close = up.shift(), mid.shift(), close.shift()
+        # 中轨的上一日值缺失时按 +inf 处理，于是「上穿」不成立，与原来一致
+        prev_ge = (prev_close >= prev_mid.fillna(np.inf)).to_numpy()
+        prev_above = (prev_up.notna() & (prev_close > prev_up)).to_numpy()
+        valid = up.notna().to_numpy()
+        buy = (close > up).to_numpy() & ~prev_above & valid
+        sell = (close < mid).to_numpy() & prev_ge & valid
+        return _signals(d["date"], buy, sell, "突破布林上轨", "跌破布林中轨")
 
 
 class KdjStrategy(Strategy):
@@ -120,14 +116,10 @@ class KdjStrategy(Strategy):
 
     def generate_signals(self, df: pd.DataFrame, params: dict) -> list[dict]:
         d = add_kdj(df)
-        out = []
-        for i in range(1, len(d)):
-            if pd.isna(d["k"].iloc[i - 1]) or pd.isna(d["d"].iloc[i - 1]):
-                continue
-            gu = d["k"].iloc[i] > d["d"].iloc[i] and d["k"].iloc[i - 1] <= d["d"].iloc[i - 1]
-            gd = d["k"].iloc[i] < d["d"].iloc[i] and d["k"].iloc[i - 1] >= d["d"].iloc[i - 1]
-            if gu and d["k"].iloc[i] < 30:
-                out.append({"date": d["date"].iloc[i], "side": "buy", "reason": "KDJ低位金叉"})
-            elif gd and d["k"].iloc[i] > 70:
-                out.append({"date": d["date"].iloc[i], "side": "sell", "reason": "KDJ高位死叉"})
-        return out
+        k, dd = d["k"], d["d"]
+        ok = k.shift().notna() & dd.shift().notna()
+        gu = (k > dd) & (k.shift() <= dd.shift())
+        gd = (k < dd) & (k.shift() >= dd.shift())
+        buy = (gu & (k < 30) & ok).to_numpy()
+        sell = (gd & (k > 70) & ok).to_numpy()
+        return _signals(d["date"], buy, sell, "KDJ低位金叉", "KDJ高位死叉")

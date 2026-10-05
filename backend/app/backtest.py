@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import datetime as dt
 import io
-import math
 import time
 
+import numpy as np
 import pandas as pd
 
 from . import db
@@ -19,10 +19,6 @@ def _df_records(df: pd.DataFrame) -> list[dict]:
             if isinstance(v, float) and pd.isna(v):
                 r[k] = None
     return out
-
-
-def _nan(v) -> bool:
-    return v is None or (isinstance(v, float) and math.isnan(v))
 
 
 def load_bars(code: str, start: str, end: str) -> pd.DataFrame:
@@ -102,6 +98,123 @@ def _range_pct(bars: list[dict]) -> float | None:
     return round((closes[-1] / closes[0] - 1) * 100, 2)
 
 
+def walk_ledger(code: str, df: pd.DataFrame, signals: list[dict],
+                capital: float, fee_rate: float) -> dict:
+    """按K线重放一遍：信号在复权价上判定，成交与现金走不复权真实价。
+
+    只在「信号日 + 复权因子变化日」推进状态机——其余交易日既不买卖、因子也没变，
+    cash 与持股数都是常数，净值按段一次算完。逐根 iterrows 的写法全市场跑批要 20 分钟，
+    这个写法不到 2 分钟，且与逐根版逐值等价（拿一批股票对账过）。
+    单只报表和全市场跑批共用这一份，否则两边收益率对不上。
+    """
+    d = df.loc[df["adj_factor"].notna() & df["close"].notna() & df["raw_close"].notna()
+               & (df["raw_close"] > 0), ["date", "close", "raw_close", "adj_factor"]]
+    dates = d["date"].tolist()
+    adj = d["close"].to_numpy(dtype=float)
+    raw = d["raw_close"].to_numpy(dtype=float)
+    fac = d["adj_factor"].to_numpy(dtype=float)
+    n = len(dates)
+    pos = {v: i for i, v in enumerate(dates)}
+
+    sig: dict[int, str] = {}
+    reason: dict[int, str] = {}
+    for s in signals:
+        i = pos.get(s["date"])
+        if i is None:
+            continue
+        sig.setdefault(i, s["side"])
+        reason[i] = s.get("reason", "")
+
+    ex_div = set(int(i) for i in np.flatnonzero(fac[1:] != fac[:-1]) + 1)
+    events = sorted(set(sig) | ex_div)
+
+    cash = float(capital)
+    qty = 0.0          # 真实持股数；除权除息日按因子折算后可能不是 100 的整数倍
+    cost_basis = 0.0   # 本轮买入成交金额（真实元）
+    buy_fee = 0.0
+    trades: list[dict] = []
+    markers: list[dict] = []
+    missed = 0         # 因资金不够一手而被放弃的买入信号数，进 summary 别让它在静默里消失
+    equity = np.empty(n)
+    seg = 0
+    for i in events:
+        # 事件日之前的那段仍属于旧状态，先按旧状态结清，再改 cash/qty
+        if i > seg:
+            equity[seg:i] = cash + qty * raw[seg:i]
+        # 除权除息：等比因子一变就按 F_t/F_(t-1) 折算持股数，等价「红利按除权日价再投」，
+        # 于是 qty×不复权价 这条市值曲线在除权日不跳空，收益口径与复权价一致。
+        if qty > 0 and fac[i] != fac[i - 1]:
+            qty *= fac[i] / fac[i - 1]
+        side = sig.get(i)
+        if side == "buy" and qty == 0:
+            lot = int(cash / (raw[i] * 100 * (1 + fee_rate))) * 100
+            if lot >= 100:
+                amount = lot * raw[i]
+                fee = amount * fee_rate
+                cash -= amount + fee
+                qty, cost_basis, buy_fee = float(lot), amount, fee
+                trades.append({
+                    "date": dates[i], "side": "buy", "code": code, "qty": lot,
+                    "price": round(raw[i], 3), "amount": round(amount, 2),
+                    "fee": round(fee, 2), "pnl": None, "pnl_pct": None,
+                    "reason": reason.get(i, ""),
+                })
+                # 买卖点画在复权K线上，所以标记价格用当日复权价，不能混真实价
+                markers.append({"date": dates[i], "type": "buy", "price": round(adj[i], 3)})
+            else:
+                missed += 1
+        elif side == "sell" and qty > 0:
+            amount = qty * raw[i]
+            fee = amount * fee_rate
+            cash += amount - fee
+            pnl = amount - fee - cost_basis - buy_fee
+            trades.append({
+                "date": dates[i], "side": "sell", "code": code, "qty": qty,
+                "price": round(raw[i], 3), "amount": round(amount, 2), "fee": round(fee, 2),
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
+                if cost_basis + buy_fee else None,
+                "reason": reason.get(i, ""),
+            })
+            markers.append({"date": dates[i], "type": "sell", "price": round(adj[i], 3)})
+            qty = cost_basis = buy_fee = 0.0
+        equity[i] = cash + qty * raw[i]
+        seg = i + 1
+    if seg < n:
+        equity[seg:n] = cash + qty * raw[seg:n]
+
+    # 还持着的按最后一根不复权收盘强平
+    final_equity = cash
+    if qty > 0:
+        amount = qty * raw[-1]
+        fee = amount * fee_rate
+        pnl = amount - fee - cost_basis - buy_fee
+        trades.append({
+            "date": dates[-1], "side": "sell", "code": code, "qty": qty,
+            "price": round(raw[-1], 3), "amount": round(amount, 2), "fee": round(fee, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
+            if cost_basis + buy_fee else None,
+            "reason": "回测结束强制平仓",
+        })
+        markers.append({"date": dates[-1], "type": "sell", "price": round(adj[-1], 3)})
+        final_equity = cash + amount - fee
+
+    fees_total = sum(t["fee"] for t in trades)
+    peak = np.maximum.accumulate(equity) if n else np.empty(0)
+    return {
+        "dates": dates, "equity": equity, "trades": trades, "markers": markers,
+        "final_equity": final_equity, "pnl": final_equity - capital,
+        "pnl_pct": (final_equity - capital) / capital * 100 if capital else None,
+        "fees_total": fees_total,
+        "order_count": len(trades),
+        "trade_count": sum(1 for t in trades if t["side"] == "buy"),
+        "missed": missed, "bars": n,
+        "max_dd_pct": float(((equity - peak) / peak).min()) * 100 if n else None,
+        "bh_pct": (adj[-1] / adj[0] - 1) * 100 if n else None,
+    }
+
+
 def run_backtest(code: str, start: str, end: str, capital: float,
                  fee_rate: float, strategy_id: str,
                  params: dict | None) -> dict:
@@ -112,86 +225,13 @@ def run_backtest(code: str, start: str, end: str, capital: float,
     df = load_bars(code, start, end)
     if df.empty or len(df) < 30:
         raise ValueError("该股票在区间内没有足够的本地K线数据，请先执行数据更新")
-    signals = strategy.generate_signals(df, params or {})
-    sig_by_date: dict[str, str] = {}
-    reason_by_date = {}
-    for s in signals:
-        sig_by_date.setdefault(s["date"], s["side"])
-        reason_by_date[s["date"]] = s.get("reason", "")
-
-    cash = float(capital)
-    qty = 0.0          # 真实持股数；除权除息日按因子折算后可能不是 100 的整数倍
-    cost_basis = 0.0   # 本轮买入成交金额（真实元）
-    buy_fee = 0.0
-    prev_factor = None
-    trades: list[dict] = []
-    markers: list[dict] = []
-    missed = 0         # 因资金不够一手而被放弃的买入信号数，进 summary 别让它在静默里消失
-
-    for _, row in df.iterrows():
-        date, adj_p, raw_p, factor = row["date"], row["close"], row["raw_close"], row["adj_factor"]
-        if _nan(adj_p) or _nan(raw_p) or _nan(factor) or raw_p <= 0:
-            continue
-        # 除权除息：等比因子一变就按 F_t/F_(t-1) 折算持股数，等价「红利按除权日价再投」，
-        # 于是 qty×不复权价 这条市值曲线在除权日不跳空，收益口径与复权价一致。
-        if qty > 0 and prev_factor:
-            qty *= factor / prev_factor
-        prev_factor = factor
-        side = sig_by_date.get(date)
-        if side == "buy" and qty == 0:
-            lot = int(cash / (raw_p * 100 * (1 + fee_rate))) * 100
-            if lot >= 100:
-                amount = lot * raw_p
-                fee = amount * fee_rate
-                cash -= amount + fee
-                qty, cost_basis, buy_fee = float(lot), amount, fee
-                trades.append({
-                    "date": date, "side": "buy", "code": code, "qty": lot,
-                    "price": round(raw_p, 3), "amount": round(amount, 2),
-                    "fee": round(fee, 2), "pnl": None, "pnl_pct": None,
-                    "reason": reason_by_date.get(date, ""),
-                })
-                # 买卖点画在复权K线上，所以标记价格用当日复权价，不能混真实价
-                markers.append({"date": date, "type": "buy", "price": round(adj_p, 3)})
-            else:
-                missed += 1
-        elif side == "sell" and qty > 0:
-            amount = qty * raw_p
-            fee = amount * fee_rate
-            cash += amount - fee
-            pnl = amount - fee - cost_basis - buy_fee
-            trades.append({
-                "date": date, "side": "sell", "code": code, "qty": qty,
-                "price": round(raw_p, 3), "amount": round(amount, 2),
-                "fee": round(fee, 2),
-                "pnl": round(pnl, 2),
-                "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
-                if cost_basis + buy_fee else None,
-                "reason": reason_by_date.get(date, ""),
-            })
-            markers.append({"date": date, "type": "sell", "price": round(adj_p, 3)})
-            qty = 0.0
-
-    # liquidate open position at last close (marked separately)
-    last = df.iloc[-1]
-    final_equity = cash
-    if qty > 0:
-        amount = qty * float(last["raw_close"])
-        fee = amount * fee_rate
-        pnl = amount - fee - cost_basis - buy_fee
-        trades.append({
-            "date": last["date"], "side": "sell", "code": code, "qty": qty,
-            "price": round(float(last["raw_close"]), 3), "amount": round(amount, 2),
-            "fee": round(fee, 2), "pnl": round(pnl, 2),
-            "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
-            if cost_basis + buy_fee else None,
-            "reason": "回测结束强制平仓",
-        })
-        markers.append({"date": last["date"], "type": "sell",
-                        "price": round(float(last["close"]), 3)})
-        final_equity = cash + amount - fee
-    fees_total = sum(t["fee"] for t in trades)
-    pnl_total = final_equity - capital
+    led = walk_ledger(code, df, strategy.generate_signals(df, params or {}),
+                      capital, fee_rate)
+    trades, markers = led["trades"], led["markers"]
+    missed = led["missed"]
+    final_equity = led["final_equity"]
+    fees_total = led["fees_total"]
+    pnl_total = led["pnl"]
 
     stock = db.query_one("SELECT * FROM stocks WHERE code=?", (code,))
     from .datasource.eastmoney import index_secid_for, INDEXES

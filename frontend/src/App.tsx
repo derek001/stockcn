@@ -7,6 +7,7 @@ import AutoScreener from "./pages/AutoScreener";
 import Selectors from "./pages/Selectors";
 import Strategies from "./pages/Strategies";
 import Backtest from "./pages/Backtest";
+import BatchBacktest from "./pages/BatchBacktest";
 
 type View =
   | { page: "data" }
@@ -16,7 +17,8 @@ type View =
   | { page: "auto" }
   | { page: "selector" }
   | { page: "strategies" }
-  | { page: "backtest"; code?: string };
+  | { page: "backtest"; code?: string }
+  | { page: "batch" };
 
 const NAV: { key: View["page"]; label: string }[] = [
   { key: "data", label: "数据中心" },
@@ -26,6 +28,7 @@ const NAV: { key: View["page"]; label: string }[] = [
   { key: "selector", label: "策略选股" },
   { key: "strategies", label: "交易策略" },
   { key: "backtest", label: "回测" },
+  { key: "batch", label: "全市场回测" },
 ];
 
 export default function App() {
@@ -63,6 +66,9 @@ export default function App() {
         {view.page === "selector" && <Selectors onOpenStock={(c) => setView({ page: "stock", code: c })} />}
         {view.page === "strategies" && <Strategies />}
         {view.page === "backtest" && <Backtest initialCode={view.code} />}
+        {view.page === "batch" && (
+          <BatchBacktest onBacktest={(c) => setView({ page: "backtest", code: c })} />
+        )}
       </div>
     </>
   );

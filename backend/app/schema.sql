@@ -111,3 +111,41 @@ CREATE TABLE IF NOT EXISTS select_result (
   PRIMARY KEY (trade_date, selector_id, code)
 );
 CREATE INDEX IF NOT EXISTS idx_select_selector ON select_result(selector_id, trade_date);
+
+-- 全市场回测：一次跑批一个批次头，summary 放分布指标、按年分解和全市场等权净值曲线
+CREATE TABLE IF NOT EXISTS bt_batch (
+  id TEXT PRIMARY KEY,              -- 批次号：策略_起止_时间戳
+  run_at TEXT NOT NULL,
+  strategy_id TEXT NOT NULL,
+  strategy_name TEXT,
+  params TEXT,                      -- JSON：本次生效参数
+  start TEXT NOT NULL,
+  end TEXT NOT NULL,
+  capital REAL NOT NULL,
+  fee_rate REAL NOT NULL,
+  stock_count INTEGER NOT NULL,     -- 实际参与只数（区间内K线>=30 根）
+  skipped INTEGER NOT NULL,         -- 因K线不足被跳过的只数
+  elapsed_sec REAL,
+  summary TEXT                      -- JSON
+);
+CREATE INDEX IF NOT EXISTS idx_bt_batch_run ON bt_batch(run_at);
+
+-- 逐只成绩单：同一批次重跑整批覆盖；excess = 策略收益 - 同期买入持有收益
+CREATE TABLE IF NOT EXISTS bt_batch_item (
+  batch_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT,
+  industry TEXT,
+  bars INTEGER,
+  buy_count INTEGER,
+  order_count INTEGER,
+  missed INTEGER,                   -- 信号来了但买不起一手的次数
+  pnl_pct REAL,
+  bh_pct REAL,
+  excess_pct REAL,
+  max_dd_pct REAL,
+  fees REAL,
+  years TEXT,                       -- JSON：{"2021": 收益%, ...} 该只每个自然年的策略收益
+  PRIMARY KEY (batch_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_bt_item_pnl ON bt_batch_item(batch_id, pnl_pct);

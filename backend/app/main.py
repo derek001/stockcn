@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import backtest as bt
+from . import backtest_batch as bt_batch
 from . import db, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
@@ -356,6 +357,57 @@ def backtest_excel(report_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition":
                  f"attachment; filename=backtest_{report_id}.xlsx"})
+
+
+# ---------------- backtest batch (全市场) ----------------
+
+class BatchBacktestReq(BaseModel):
+    start: str = ""
+    end: str = ""
+    capital: float = 1_000_000
+    fee_rate: float = 0.0003
+    strategy_id: str
+    params: dict = {}
+
+
+@app.post("/api/backtest/batch/run")
+def batch_run(body: BatchBacktestReq):
+    import datetime as dt
+    end = body.end or dt.date.today().isoformat()
+    start = body.start or (dt.date.fromisoformat(end) - dt.timedelta(days=3650)).isoformat()
+    msg, st = bt_batch.start(body.strategy_id, body.params, start, end,
+                             body.capital, body.fee_rate)
+    if msg == "started":
+        return {"ok": True, **st}
+    raise HTTPException(400, msg)
+
+
+@app.get("/api/backtest/batch/status")
+def batch_status():
+    return bt_batch.status()
+
+
+@app.get("/api/backtest/batch/list")
+def batch_list(limit: int = Query(30, ge=1, le=200)):
+    return {"batches": bt_batch.list_batches(limit)}
+
+
+@app.get("/api/backtest/batch/result")
+def batch_result(batch_id: str = Query(...), sort: str = "excess_pct",
+                 desc: bool = True, limit: int = Query(100, ge=1, le=500),
+                 offset: int = Query(0, ge=0), q: str = ""):
+    head = bt_batch.get_batch(batch_id)
+    if head is None:
+        raise HTTPException(404, "批次不存在，请重新跑一次全市场回测")
+    return {"batch": head, **bt_batch.items(batch_id, sort, desc, limit, offset, q)}
+
+
+@app.get("/api/backtest/batch/curve")
+def batch_curve(batch_id: str = Query(...), top_n: int = Query(0, ge=0, le=100)):
+    got = bt_batch.curve(batch_id, top_n)
+    if got.get("error"):
+        raise HTTPException(400, got["error"])
+    return got
 
 
 # ---------------- frontend ----------------

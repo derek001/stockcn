@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import KLineChart, { Bar } from "../KLineChart";
 import { api, fmt } from "../api";
+import { minusYears, ymd } from "../util";
 
 interface Trade {
   date: string; side: "buy" | "sell"; qty: number; price: number;
@@ -143,18 +144,6 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
       {report && <ReportView r={report} />}
     </>
   );
-}
-
-function ymd(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function minusYears(iso: string, years: number): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  const t = new Date(y, m - 1, d);
-  t.setFullYear(t.getFullYear() - years);
-  return ymd(t);
 }
 
 function ReportView({ r }: { r: Report }) {
