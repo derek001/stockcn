@@ -92,8 +92,9 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
             <th>ROE</th><th>营收同比</th><th>净利同比</th><th>RSI</th>
             <th>收盘价日期</th><th className="l">信号</th>
             {hasBox && (<>
-              <th>箱底(元)</th><th>箱顶(元)</th><th>箱体高度%</th><th>现价位置%</th>
-              <th>三年斜率%/年</th><th>穿越次数</th><th>带内占比%</th><th>现价÷3年最低</th><th>近60日挖坑</th>
+              <th>箱底(元)</th><th>箱顶(元)</th><th>密集带宽%</th><th>段内振幅%</th><th>现价位置%</th>
+              <th>箱体斜率%/年</th><th>穿越次数</th><th>带内占比%</th>
+              <th>出清回撤%</th><th>箱底日期</th><th>横盘(日)</th><th>近60日挖坑</th>
             </>)}
           </tr>
         </thead>
@@ -128,17 +129,20 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
                 <td>{fmt.n(r.box_bottom as number)}</td>
                 <td>{fmt.n(r.box_top as number)}</td>
                 <td>{fmt.n(r.box_height as number, 1)}</td>
+                <td>{fmt.n(r.box_ext_height as number, 1)}</td>
                 <td>{fmt.n(r.box_pos as number, 1)}</td>
                 <td>{fmt.n(r.box_slope_3y as number)}</td>
                 <td>{fmt.n(r.box_cross as number, 0)}</td>
                 <td>{fmt.n(r.box_time_pct as number, 1)}</td>
-                <td>{fmt.n(r.box_rebound as number)}</td>
+                <td>{fmt.n(r.box_decline_pre as number, 1)}</td>
+                <td>{(r.box_bottom_date as string) ?? "-"}</td>
+                <td>{fmt.n(r.box_bars as number, 0)}</td>
                 <td>{r.box_dip_60d ? "是" : "-"}</td>
               </>)}
             </tr>
           ))}
           {!rows.length && (
-            <tr><td colSpan={17 + (hasScore ? 1 : 0) + (selectable ? 1 : 0) + (hasBox ? 9 : 0)}
+            <tr><td colSpan={17 + (hasScore ? 1 : 0) + (selectable ? 1 : 0) + (hasBox ? 12 : 0)}
               className="l muted">无匹配结果</td></tr>
           )}
         </tbody>

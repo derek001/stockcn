@@ -25,6 +25,7 @@ ATTR_FIELDS = [
 BOX_ATTR_FIELDS = [
     "box_top", "box_bottom", "box_height", "box_ext_height", "box_pos",
     "box_slope_3y", "box_cross", "box_time_pct", "box_rebound", "box_dip_60d",
+    "box_bottom_date", "box_decline_pre", "box_bars",
 ]
 
 

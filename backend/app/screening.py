@@ -37,19 +37,22 @@ FUNDAMENTAL_FIELDS = [
     {"field": "gross_margin", "label": "毛利率(%)", "type": "number", "ops": [">=", "<=", ">", "<"]},
 ]
 
-# 长箱体（box-range）派生字段：回看 750 个交易日的复权收盘密集带，口径见 boxrange.py 文件头。
+# 长箱体（box-range）派生字段：先在 6 年里找出「一波下跌出清」的箱底，再在底之后的段上算密集带，
+# 口径见 boxrange.py 文件头。
 # 「带内占比 box_time_pct」不在这里——箱顶/箱底本身就是「覆盖 80% 交易日的最窄区间」，
 # 所以它恒 ≥80%（2026-10-03 用户确认 B4 撤掉筛选、只当展示列），放进目录会误导。
+# 「箱底日期 box_bottom_date」是文本，只给结果表展示，不进条件目录。
 BOX_FIELDS = [
-    {"field": "box_height", "label": "箱体高度%(3年密集带)", "type": "number", "ops": [">=", "<="]},
-    {"field": "box_ext_height", "label": "3年振幅%(最高/最低收盘)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_height", "label": "箱体高度%(密集带)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_ext_height", "label": "箱内振幅%(段内最高÷最低收盘)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_pos", "label": "现价在箱体位置%", "type": "number", "ops": [">=", "<="]},
-    {"field": "box_slope_3y", "label": "箱体年化斜率%(3年)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_slope_3y", "label": "箱体年化斜率%", "type": "number", "ops": [">=", "<="]},
     {"field": "box_cross", "label": "收盘穿越箱体中线次数", "type": "number", "ops": [">=", "<="]},
-    {"field": "box_rebound", "label": "现价÷3年最低收盘(倍)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_rebound", "label": "现价÷段内最低收盘(倍)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_decline_pre", "label": "出清回撤%(箱底前3年最高÷箱底)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_dip_60d", "label": "近60日挖坑后收回(1是0否)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_years", "label": "上市年限(按首根日线)", "type": "number", "ops": [">=", "<="]},
-    {"field": "box_bars", "label": "3年窗口内有效bar数", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_bars", "label": "箱体段交易日数", "type": "number", "ops": [">=", "<="]},
 ]
 
 TECHNICAL_FIELDS = [
@@ -136,12 +139,12 @@ def load_universe(force: bool = False) -> dict[str, dict]:
     return universe
 
 
-def ensure_box(universe: dict[str, dict], look_days: int = boxrange.DEFAULT_LOOK_DAYS,
+def ensure_box(universe: dict[str, dict], find_days: int = boxrange.DEFAULT_FIND_DAYS,
                dense_pct: float = boxrange.DEFAULT_DENSE_PCT) -> None:
-    """把箱体指标挂到 ctx["box"] 上——只在条件真的用到箱体时才跑（全市场算一次 33~47s，之后命中内存缓存秒回）。"""
+    """把箱体指标挂到 ctx["box"] 上——只在条件真的用到箱体时才跑（全市场算一次耗时见 README，之后命中内存缓存秒回）。"""
     if any(ctx.get("box") for ctx in universe.values()):
         return
-    bmap = boxrange.compute(look_days, dense_pct)
+    bmap = boxrange.compute(find_days, dense_pct)
     for code, ctx in universe.items():
         if code in bmap:
             ctx["box"] = bmap[code]
@@ -255,5 +258,8 @@ def _row(code: str, ctx: dict) -> dict:
         "box_cross": box.get("box_cross"),
         "box_time_pct": box.get("box_time_pct"),
         "box_rebound": box.get("box_rebound"),
+        "box_decline_pre": box.get("box_decline_pre"),
         "box_dip_60d": box.get("box_dip_60d"),
+        "box_bars": box.get("box_bars"),
+        "box_bottom_date": box.get("box_bottom_date"),
     }

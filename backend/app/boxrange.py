@@ -1,23 +1,32 @@
-"""长箱体（box-range）统计：从日线算 3 年箱体的顶/底、高度、年化斜率、穿越次数、带内占比、挖坑。
+"""长箱体（box-range）统计：先找「一波下跌出清」的底，再在底之后的段上算箱体。
 
-口径（2026-10-03 与用户确认，四条）：
-- 计算一律用等比后复权价 `close * adj_factor`。下面产出的比值/百分比类字段与复权口径无关；
-  箱顶/箱底为了和页面上的「最新价」对齐，换算回今日价坐标（整段 ÷ 该股最新复权因子）。
-- 箱体上下沿 = **覆盖 dense_pct% 交易日收盘的比值最窄区间**（密集区），不是区间极值。
-  「最窄」按 ln 距离（= 顶/底比值）量，与 B1 的高度定义 顶/底-1 同一个目标函数；按绝对价差量会选出
-  明显偏低的另一条带（603969：比值口径高 105%，价差口径高 132%），不可混用。
-  极值只用于两件事：「现价已脱离底部」和「近 60 日挖坑跌破箱底」。
-  注意由此推出的一个后果：带内占比 `box_time_pct` 恒 ≥ dense_pct（分箱宽度只会让它略高），
-  所以它不能当硬过滤条件用（实测 dense=80 时全市场 5570 只全部 ≥80%），只作为展示/排序项。
-- 年化斜率 = 对 ln(复权收盘) 关于**全市场交易日序号**做最小二乘，再 (exp(slope*250)-1) 年化。
-  用全市场日历序号而不是「该股自身第几根 bar」，是为了让停牌缺口体现在时间轴上；
-  实测两者对无停牌个股年化斜率完全相同（中位差 0.0000%），只在停牌股上有差异。
+口径（2026-10-05 与用户重定，四条规则）：
+1. **价格一律用收盘价**（含「挖坑」，不再看盘中最低价 `low`），计算用等比后复权收盘 `close * adj_factor`。
+   比值/百分比类字段与复权口径无关；箱顶/箱底为与页面上的「最新价」对齐，整段 ÷ 该股最新复权因子。
+2. **先找底**：在最近 6 年（1500 个交易日）里取最低复权收盘，其日期 `box_bottom_date` 就是「出清完成」那一点
+   （并列取最早一根，实测取最早/最晚对段长与高度分布几乎无差：段≥600 根的只数 2697 vs 2691）。
+   **箱体段 = 该日之后（含当日）的日线**，段根数 `box_bars`，段长必须 ≥3 年才谈得上「3 年以上箱体」。
+3. **箱体上下沿 = 段内覆盖 dense_pct% 交易日收盘的比值最窄区间**（密集带），不是段内极值。
+   「最窄」按 ln 距离（= 顶/底比值）量，与高度定义 顶/底−1 同一个目标函数；按绝对价差量会选出明显偏低的
+   另一条带（603696：比值口径高 105%，价差口径高 132%），不可混用。
+   段内收盘极值另出一个字段 `box_ext_height`（段内最高收盘 ÷ 最低收盘 − 1）当**形状门槛**用 ——
+   用户规则「箱顶比箱底最多高一倍」就是它 ≤100%。带高与振幅的大小关系只受分箱边界约束：
+   带不含段内极值时 `box_height < box_ext_height`；带把两极值都包进去时（横得极齐的票）带边各外扩一格，
+   `box_height` 反而比振幅大到多 0.25%×(1+振幅)。所以「带高 ≤ 振幅」不是恒成立的不变量。
+4. **出清段 = 箱底之前的那 750 个交易日**（按全市场日历倒推，逐股各自的窗口），
+   `box_decline_pre` = 1 − 箱底 ÷ 该段最高复权收盘，即「一波下跌」的深度。
+
+其余：
+- 年化斜率 = 对 ln(复权收盘) 关于**全市场交易日序号**做最小二乘，再 (exp(slope*250)-1) 年化。用全市场日历序号
+  而不是「该股自身第几根 bar」，停牌缺口才会体现在时间轴上（实测无停牌个股两者完全相同，中位差 0.0000%）。
+- 挖坑 = 近 60 个交易日有**收盘**跌破密集带下沿，且现价又收回带内。
 - 「上市满 N 年」用首根日线日期判（`stocks.list_date` 全库 NULL，没有可用来源）。
+- `box_time_pct`（带内占比）按定义恒 ≥ dense_pct，只能展示/排序，不能当硬过滤。
 
-实现上刻意不走 `screening.load_universe()` 的那条 pandas 路径：750 交易日是 400 万行，
-搬进 Python 会把冷启动从 45s 拖到几分钟，所以统计全部在 SQLite 侧聚合，只回传每只一行。
-两遍扫描：① 收盘按 ln 做 0.25% 分箱直方图 → Python 滑窗求最窄密集带；
-② 密集带写进临时表，一遍带 LAG 的聚合出全部统计量。约 28s（依赖 db.py 的页缓存/临时表内存化）。
+实现刻意不走 `screening.load_universe()` 的 pandas 路径：2250 交易日约 570 万行，全市场载入 Python 会拖到几分钟，
+所以统计尽量在 SQLite 侧聚合，只回传每只一行。逐遍：① 找底窗口内最低复权收盘 → ② 该最低值出现的日期（并列取最早）
+→ ③ 段内收盘按 ln 做 0.25% 分箱直方图，Python 滑窗求最窄密集带 → ④ 底之前 750 根的最高收盘（出清深度）
+→ ⑤ 密集带写进临时表，一遍带 LAG 的聚合出段内全部统计量。全市场实测耗时见 README（比旧的两遍扫描明显变长）。
 """
 from __future__ import annotations
 
@@ -29,26 +38,48 @@ from . import db
 
 # 分箱宽度：ln(价) × 400，即 0.25% 的价格精度。
 # 实测（200 只箱体池样本，对「连续价上的比值最窄带」复核）：格宽 1% 时箱底/箱顶中位偏差 1.08%、
-# 半数样本 >1%；0.25% 时中位 0.19%、p90 0.97%，_bands 从 10.7s 增到 13.9s。再细只剩并列歧义。
+# 半数样本 >1%；0.25% 时中位 0.19%、p90 0.97%。再细只剩并列歧义。
 BIN_SCALE = 400
 TRADING_DAYS = 250
-DEFAULT_LOOK_DAYS = 750
+DEFAULT_FIND_DAYS = 1500    # 找底窗口：6 年
+DEFAULT_PRE_DAYS = 750      # 出清段：箱底之前 3 年
 DEFAULT_DENSE_PCT = 80.0
+RECENT_DAYS = 60            # 「挖坑」的近端窗口
 
-# (基准日, 回看天数, 密集占比) -> {code: 指标}
+# (基准日, 找底天数, 密集占比) -> {code: 指标}
 _cache: dict[tuple, dict[str, dict]] = {}
 _CACHE_MAX = 4
 
 _BAND_TABLE = "box_band_tmp"
 _DATE_TABLE = "box_date_tmp"
+_MIN_TABLE = "box_min_tmp"
+_BTM_TABLE = "box_bottom_tmp"
 
-# 密集带：ln(复权收盘) 的 0.25% 分箱直方图，按 (code, 分箱) 聚好后交给 Python 滑窗
+# ① 找底窗口内的最低复权收盘
+_MIN_SQL = (
+    "SELECT code, MIN(close * adj_factor) FROM kline_daily "
+    "WHERE date >= ? AND close > 0 AND adj_factor > 0 GROUP BY code")
+
+# ② 该最低值出现的日期；并列取最早一根（MIN(date)）。浮点等值成立：SQLite 存的乘积与这里重算是同一串位。
+_BTM_SQL = (
+    "SELECT k.code, MIN(k.date) FROM kline_daily k JOIN %s m ON m.code = k.code "
+    "AND k.close * k.adj_factor = m.mn WHERE k.date >= ? AND k.close > 0 AND k.adj_factor > 0 "
+    "GROUP BY k.code" % _MIN_TABLE)
+
+# ③ 段内收盘的 ln 分箱直方图（0.25% 格宽），滑窗求最窄密集带
 _HIST_SQL = (
-    "SELECT code, CAST(FLOOR(LN(close * adj_factor) * ?) AS INT), COUNT(*) "
-    "FROM kline_daily WHERE date >= ? AND close > 0 AND adj_factor > 0 GROUP BY 1, 2 ORDER BY 1, 2")
+    "SELECT k.code, CAST(FLOOR(LN(k.close * k.adj_factor) * ?) AS INT), COUNT(*) "
+    "FROM kline_daily k JOIN %s b ON b.code = k.code WHERE k.date >= b.bd "
+    "AND k.close > 0 AND k.adj_factor > 0 GROUP BY 1, 2 ORDER BY 1, 2" % _BTM_TABLE)
 
-# 一遍聚合出箱体全部统计量。x = 全市场交易日序号（_DATE_TABLE）；
-# crossings 靠 LAG 比较相邻两根在中线上/下；带内天数靠 _BAND_TABLE 的 [lo, hi]。
+# ④ 出清段：底之前那 750 个交易日的最高复权收盘（pd = 逐股倒推出来的窗口起点，存在 _BTM_TABLE）
+_PREMAX_SQL = (
+    "SELECT k.code, MAX(k.close * k.adj_factor) FROM kline_daily k JOIN %s b ON b.code = k.code "
+    "WHERE k.date >= b.pd AND k.date < b.bd AND k.close > 0 AND k.adj_factor > 0 GROUP BY k.code" % _BTM_TABLE)
+
+# ⑤ 一遍聚合出箱体段全部统计量。x = 全市场交易日序号（_DATE_TABLE）；
+# crossings 靠 LAG 比较相邻两根在中线上/下；带内天数靠 _BAND_TABLE 的 [lo, hi]；
+# recent_min 用**收盘价**（规则 1），不再是盘中最低价。
 _STATS_SQL = f"""
 SELECT code,
        COUNT(*) AS bars,
@@ -57,7 +88,7 @@ SELECT code,
        SUM(x) AS sx, SUM(ln) AS sl, SUM(x * ln) AS sxl, SUM(x * x) AS sxx,
        SUM(CASE WHEN prev IS NOT NULL AND above <> prev THEN 1 ELSE 0 END) AS crossings,
        SUM(in_band) AS in_band,
-       MIN(low_recent) AS low60,
+       MIN(recent_min) AS recent_min,
        MAX(last_close) AS last_close
 FROM (
   SELECT k.code AS code,
@@ -66,18 +97,17 @@ FROM (
          LAG(CASE WHEN k.c >= (b.lo + b.hi) / 2 THEN 1 ELSE 0 END)
            OVER (PARTITION BY k.code ORDER BY k.date) AS prev,
          CASE WHEN k.c BETWEEN b.lo AND b.hi THEN 1 ELSE 0 END AS in_band,
-         CASE WHEN k.date >= ? THEN k.lown END AS low_recent,
+         CASE WHEN k.date >= ? THEN k.c END AS recent_min,
          CASE WHEN k.date = ? THEN k.c END AS last_close
   FROM (
     SELECT kd.code AS code, kd.date AS date,
            kd.close * kd.adj_factor AS c,
            LN(kd.close * kd.adj_factor) AS ln,
-           kd.low * kd.adj_factor AS lown,
            d.x AS x
     FROM kline_daily kd JOIN {_DATE_TABLE} d ON d.date = kd.date
     WHERE kd.date >= ? AND kd.close > 0 AND kd.adj_factor > 0
   ) k
-  JOIN {_BAND_TABLE} b ON b.code = k.code
+  JOIN {_BAND_TABLE} b ON b.code = k.code AND k.date >= b.bd
 ) GROUP BY code
 """
 
@@ -94,7 +124,7 @@ def latest_bar_date() -> str:
 
 
 def _nth_last_date(back_days: int) -> str:
-    """库里倒数第 back_days 个有行情的日历日（回看窗口起点、近 60 日分界都用它）。"""
+    """库里倒数第 back_days 个有行情的日历日（找底窗口起点、出清段起点、近 60 日分界都用它）。"""
     row = db.query_one(
         "SELECT date FROM (SELECT DISTINCT date FROM kline_daily "
         "ORDER BY date DESC LIMIT 1 OFFSET ?)", (back_days - 1,))
@@ -127,28 +157,13 @@ def _dense_band(counts: list[tuple[int, int]], n: int, dense_pct: float) -> tupl
     return (math.exp(best[1] / BIN_SCALE), math.exp((best[2] + 1) / BIN_SCALE))
 
 
-def _bands(start: str, dense_pct: float) -> dict[str, tuple[float, float]]:
-    """直方图 → 每只股票的密集区上下沿（后复权价）。"""
-    per: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    totals: dict[str, int] = defaultdict(int)
-    for code, bin_, k in db.query_rows(_HIST_SQL, (BIN_SCALE, start)):
-        per[code].append((bin_, k))
-        totals[code] += k
-    out = {}
-    for code, counts in per.items():
-        band = _dense_band(counts, totals[code], dense_pct)
-        if band:
-            out[code] = band
-    return out
-
-
 def _regression_pct_year(bars: int, sx: float, sl: float, sxl: float, sxx: float) -> float | None:
     """ln(复权收盘) 对交易日序号最小二乘，按 250 交易日年化成百分比。"""
     den = bars * sxx - sx * sx
     if bars < 2 or den <= 0:
         return None
     v = (bars * sxl - sx * sl) / den * TRADING_DAYS
-    if v > 20:  # exp 溢出（只有十几根 bar 的新股会到这里）
+    if v > 20:  # exp 溢出
         return None
     return (math.exp(v) - 1) * 100
 
@@ -167,46 +182,80 @@ def _years_between(d1: str, d2: str) -> float | None:
     return (b - a).days / 365.25
 
 
-def compute(look_days: int = DEFAULT_LOOK_DAYS,
+def compute(find_days: int = DEFAULT_FIND_DAYS,
             dense_pct: float = DEFAULT_DENSE_PCT) -> dict[str, dict]:
-    """全市场箱体指标，返回 {code: {...}}；按 (基准日, 回看天数, 密集占比) 缓存。"""
+    """全市场箱体指标，返回 {code: {...}}；按 (基准日, 找底天数, 密集占比) 缓存。"""
     base = latest_bar_date()
     if not base:
         return {}
-    key = (base, look_days, dense_pct)
+    key = (base, find_days, dense_pct)
     if key in _cache:
         return _cache[key]
 
-    start = _nth_last_date(look_days)
-    recent_from = _nth_last_date(60)
-    if not start:
+    find_start = _nth_last_date(find_days)
+    load_start = _nth_last_date(find_days + DEFAULT_PRE_DAYS)
+    recent_from = _nth_last_date(RECENT_DAYS)
+    if not find_start:
         return {}
+    if not load_start:  # 库里不足 9 年（首次导入、只回补了几年）：从最早一天起算出清段
+        load_start = (db.query_one("SELECT MIN(date) AS d FROM kline_daily") or {}).get("d") or find_start
 
-    bands = _bands(start, dense_pct)
-    if not bands:
-        return {}
-
+    # 全市场交易日历：x 给斜率用（停牌缺口要落在时间轴上），倒推 750 格给每只票定出清段起点
     dates = [r["date"] for r in
              db.query("SELECT DISTINCT date FROM kline_daily WHERE date >= ? ORDER BY date",
-                      (start,))]
+                      (load_start,))]
+    if not dates:
+        return {}
+    x_of = {d: i + 1 for i, d in enumerate(dates)}
+
     conn = db.get_conn()  # 临时表建在这条共享连接上，同一连接才看得见
-    db.execute(f"CREATE TEMP TABLE IF NOT EXISTS {_BAND_TABLE} "
-               f"(code TEXT PRIMARY KEY, lo REAL, hi REAL)")
-    db.execute(f"CREATE TEMP TABLE IF NOT EXISTS {_DATE_TABLE} "
-               f"(date TEXT PRIMARY KEY, x REAL)")
-    db.execute(f"DELETE FROM {_BAND_TABLE}")
-    db.execute(f"DELETE FROM {_DATE_TABLE}")
-    db.execute(f"INSERT INTO {_BAND_TABLE}(code, lo, hi) VALUES (?,?,?)",
-               many=[(c, lo, hi) for c, (lo, hi) in bands.items()])
-    db.execute(f"INSERT INTO {_DATE_TABLE}(date, x) VALUES (?,?)",
-               many=[(d, i + 1) for i, d in enumerate(dates)])
+    for tbl, cols in ((_MIN_TABLE, "code TEXT PRIMARY KEY, mn REAL"),
+                      (_BTM_TABLE, "code TEXT PRIMARY KEY, bd TEXT, pd TEXT"),
+                      (_BAND_TABLE, "code TEXT PRIMARY KEY, lo REAL, hi REAL, bd TEXT"),
+                      (_DATE_TABLE, "date TEXT PRIMARY KEY, x REAL")):
+        db.execute(f"CREATE TEMP TABLE IF NOT EXISTS {tbl} ({cols})")
+        db.execute(f"DELETE FROM {tbl}")
     try:
-        agg = db.query(_FACTOR_SQL, (recent_from, base, start))
+        db.execute(f"INSERT INTO {_DATE_TABLE}(date, x) VALUES (?,?)",
+                   many=[(d, i + 1) for i, d in enumerate(dates)])
+        db.execute(f"INSERT INTO {_MIN_TABLE}(code, mn) VALUES (?,?)",
+                   many=[(r[0], r[1]) for r in db.query_rows(_MIN_SQL, (find_start,))])
+        # 出清段起点 pd = 箱底在日历上往前数 DEFAULT_PRE_DAYS 格；不足则从日历最早一天起（回撤照算，
+        # 只是窗口短于 3 年 —— 新股会走到这里，段根数门槛本来就会把它们挡掉）
+        bottoms = []
+        for code, bd in db.query_rows(_BTM_SQL, (find_start,)):
+            idx = x_of.get(bd)
+            if idx is None:
+                continue
+            bottoms.append((code, bd, dates[max(0, idx - 1 - DEFAULT_PRE_DAYS)]))
+        if not bottoms:
+            return {}
+        db.execute(f"INSERT INTO {_BTM_TABLE}(code, bd, pd) VALUES (?,?,?)", many=bottoms)
+
+        per_hist: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        n_of: dict[str, int] = defaultdict(int)
+        for code, bin_, k in db.query_rows(_HIST_SQL, (BIN_SCALE,)):
+            per_hist[code].append((bin_, k))
+            n_of[code] += k
+        bands = {}
+        for code, counts in per_hist.items():
+            band = _dense_band(counts, n_of[code], dense_pct)
+            if band:
+                bands[code] = band
+        if not bands:
+            return {}
+        bd_of = {c: bd for c, bd, _ in bottoms}
+        db.execute(f"INSERT INTO {_BAND_TABLE}(code, lo, hi, bd) VALUES (?,?,?,?)",
+                   many=[(c, lo, hi, bd_of.get(c, "")) for c, (lo, hi) in bands.items()])
+
+        premax = {r[0]: r[1] for r in db.query_rows(_PREMAX_SQL)}
+        agg = db.query(_FACTOR_SQL, (recent_from, base, find_start))
     finally:
-        db.execute(f"DROP TABLE IF EXISTS {_BAND_TABLE}")
-        db.execute(f"DROP TABLE IF EXISTS {_DATE_TABLE}")
+        for tbl in (_MIN_TABLE, _BTM_TABLE, _BAND_TABLE, _DATE_TABLE):
+            db.execute(f"DROP TABLE IF EXISTS {tbl}")
         conn.commit()
 
+    bottom_date = {c: bd for c, bd, _ in bottoms}
     first = _first_dates()
     out: dict[str, dict] = {}
     for r in agg:
@@ -215,20 +264,22 @@ def compute(look_days: int = DEFAULT_LOOK_DAYS,
         if not band:
             continue
         lo, hi = band
-        bars = r["bars"] or 0
+        seg_bars = r["bars"] or 0
         last_close, min_close = r["last_close"], r["min_close"]
         factor = r["factor_last"] or 0
         height = (hi / lo - 1) * 100 if lo > 0 else None
-        ext_height = ((r["max_close"] / r["min_close"] - 1) * 100
-                      if r["min_close"] and r["max_close"] else None)
-        time_pct = (r["in_band"] or 0) / bars * 100 if bars else None
+        ext_height = ((r["max_close"] / min_close - 1) * 100
+                      if min_close and r["max_close"] else None)
+        time_pct = (r["in_band"] or 0) / seg_bars * 100 if seg_bars else None
         pos = ((last_close - lo) / (hi - lo) * 100
                if last_close is not None and hi > lo else None)
         rebound = last_close / min_close if last_close and min_close else None
-        low60 = r["low60"]
-        # 挖坑：近 60 个交易日的复权最低价跌破密集区下沿，且现价又收回箱体内
-        dip = 1 if (low60 is not None and last_close is not None and lo
-                    and low60 < lo and lo <= last_close <= hi) else 0
+        pm = premax.get(code)
+        decline = (1 - min_close / pm) * 100 if pm and min_close and pm > min_close else None
+        recent_min = r["recent_min"]
+        # 挖坑：近 60 个交易日的**收盘价**跌破密集区下沿，且现价又收回带内（规则 1）
+        dip = 1 if (recent_min is not None and last_close is not None and lo
+                    and recent_min < lo and lo <= last_close <= hi) else 0
         out[code] = {
             # 展示坐标：整段除以最新复权因子换回「今日价口径」（元），比值类字段不受影响
             "box_top": round(hi / factor, 2) if factor else None,
@@ -237,12 +288,14 @@ def compute(look_days: int = DEFAULT_LOOK_DAYS,
             "box_ext_height": round(ext_height, 1) if ext_height is not None else None,
             "box_pos": round(pos, 1) if pos is not None else None,
             "box_slope_3y": (lambda v: round(v, 2) if v is not None else None)(
-                _regression_pct_year(bars, r["sx"], r["sl"], r["sxl"], r["sxx"])),
+                _regression_pct_year(seg_bars, r["sx"], r["sl"], r["sxl"], r["sxx"])),
             "box_cross": r["crossings"] or 0,
             "box_time_pct": round(time_pct, 1) if time_pct is not None else None,
             "box_rebound": round(rebound, 2) if rebound is not None else None,
             "box_dip_60d": dip,
-            "box_bars": bars,
+            "box_bars": seg_bars,
+            "box_bottom_date": bottom_date.get(code),
+            "box_decline_pre": round(decline, 1) if decline is not None else None,
             "box_years": (lambda v: round(v, 1) if v is not None else None)(
                 _years_between(first.get(code, ""), base)),
         }

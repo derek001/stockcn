@@ -215,9 +215,9 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                         <th>最新价</th><th>涨跌幅</th><th>流通市值(亿)</th><th>PE(TTM)</th>
                         <th>PB</th><th>ROE%</th><th>净利同比</th><th>量比</th><th>20日涨幅</th>
                         {hasBox && (<>
-                          <th>箱底(元)</th><th>箱顶(元)</th><th>箱体高度%</th><th>现价位置%</th>
-                          <th>三年斜率%/年</th><th>穿越次数</th><th>带内占比%</th>
-                          <th>现价÷3年最低</th><th>近60日挖坑</th>
+                          <th>箱底(元)</th><th>箱顶(元)</th><th>密集带宽%</th><th>段内振幅%</th>
+                          <th>现价位置%</th><th>箱体斜率%/年</th><th>穿越次数</th><th>带内占比%</th>
+                          <th>出清回撤%</th><th>箱底日期</th><th>横盘(日)</th><th>近60日挖坑</th>
                         </>)}
                       </tr>
                     </thead>
@@ -254,17 +254,20 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                             <td>{fmt.n(r.attrs.box_bottom as number)}</td>
                             <td>{fmt.n(r.attrs.box_top as number)}</td>
                             <td>{fmt.n(r.attrs.box_height as number, 1)}</td>
+                            <td>{fmt.n(r.attrs.box_ext_height as number, 1)}</td>
                             <td>{fmt.n(r.attrs.box_pos as number, 1)}</td>
                             <td>{fmt.n(r.attrs.box_slope_3y as number)}</td>
                             <td>{fmt.n(r.attrs.box_cross as number, 0)}</td>
                             <td>{fmt.n(r.attrs.box_time_pct as number, 1)}</td>
-                            <td>{fmt.n(r.attrs.box_rebound as number)}</td>
+                            <td>{fmt.n(r.attrs.box_decline_pre as number, 1)}</td>
+                            <td>{r.attrs.box_bottom_date ?? "-"}</td>
+                            <td>{fmt.n(r.attrs.box_bars as number, 0)}</td>
                             <td>{r.attrs.box_dip_60d ? "是" : "-"}</td>
                           </>)}
                         </tr>
                       ))}
                       {!h.rows.length && (
-                        <tr><td colSpan={16 + (hasBox ? 9 : 0)} className="l muted">这个日期没有入选的股票</td></tr>
+                        <tr><td colSpan={16 + (hasBox ? 12 : 0)} className="l muted">这个日期没有入选的股票</td></tr>
                       )}
                     </tbody>
                   </table>
