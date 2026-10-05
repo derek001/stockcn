@@ -21,15 +21,22 @@ def _df_records(df: pd.DataFrame) -> list[dict]:
     return out
 
 
-def load_bars(code: str, start: str, end: str) -> pd.DataFrame:
-    """回测用的日线：价格取复权口径（价格 × 因子），量额保持交易所原值。
+def _nan(v) -> bool:
+    return v is None or (isinstance(v, float) and math.isnan(v))
 
-    回测必须用复权价，否则跨除权日会凭空亏掉一笔分红送转的市值。
+
+def load_bars(code: str, start: str, end: str) -> pd.DataFrame:
+    """回测用的日线：`open/high/low/close` 是复权口径（价格 × 因子），另附 `raw_close`
+    （交易所不复权收盘）与 `adj_factor`，量额保持交易所原值。
+
+    信号必须用复权价，否则跨除权日会凭空亏掉一笔分红送转的市值；
+    成交必须用不复权价，因为「一手 = 100 股 × 真实股价」才是真实占用资金，
+    拿复权价算手数会把高价股撑成 6~7 倍、100 万连一手都买不起。
     """
     rows = db.query(
         "SELECT date, open*adj_factor AS open, high*adj_factor AS high, "
         "low*adj_factor AS low, close*adj_factor AS close, "
-        "volume, amount, pct_chg "
+        "volume, amount, pct_chg, close AS raw_close, adj_factor "
         "FROM kline_daily WHERE code=? AND date>=? AND date<=? ORDER BY date",
         (code, start, end))
     return pd.DataFrame(rows)
@@ -113,61 +120,68 @@ def run_backtest(code: str, start: str, end: str, capital: float,
         reason_by_date[s["date"]] = s.get("reason", "")
 
     cash = float(capital)
-    qty = 0
-    cost_basis = 0.0
+    qty = 0.0          # 真实持股数；除权除息日按因子折算后可能不是 100 的整数倍
+    cost_basis = 0.0   # 本轮买入成交金额（真实元）
     buy_fee = 0.0
+    prev_factor = None
     trades: list[dict] = []
     markers: list[dict] = []
-    cur_buy = None
+    missed = 0         # 因资金不够一手而被放弃的买入信号数，进 summary 别让它在静默里消失
 
     for _, row in df.iterrows():
-        date, price = row["date"], row["close"]
-        side = sig_by_date.get(date)
-        if side is None or price is None or (isinstance(price, float) and math.isnan(price)):
+        date, adj_p, raw_p, factor = row["date"], row["close"], row["raw_close"], row["adj_factor"]
+        if _nan(adj_p) or _nan(raw_p) or _nan(factor) or raw_p <= 0:
             continue
+        # 除权除息：等比因子一变就按 F_t/F_(t-1) 折算持股数，等价「红利按除权日价再投」，
+        # 于是 qty×不复权价 这条市值曲线在除权日不跳空，收益口径与复权价一致。
+        if qty > 0 and prev_factor:
+            qty *= factor / prev_factor
+        prev_factor = factor
+        side = sig_by_date.get(date)
         if side == "buy" and qty == 0:
-            lot = int(cash / (price * 100 * (1 + fee_rate))) * 100
+            lot = int(cash / (raw_p * 100 * (1 + fee_rate))) * 100
             if lot >= 100:
-                amount = lot * price
+                amount = lot * raw_p
                 fee = amount * fee_rate
                 cash -= amount + fee
-                qty, cost_basis, buy_fee = lot, amount, fee
-                cur_buy = date
+                qty, cost_basis, buy_fee = float(lot), amount, fee
                 trades.append({
                     "date": date, "side": "buy", "code": code, "qty": lot,
-                    "price": round(price, 3), "amount": round(amount, 2),
+                    "price": round(raw_p, 3), "amount": round(amount, 2),
                     "fee": round(fee, 2), "pnl": None, "pnl_pct": None,
                     "reason": reason_by_date.get(date, ""),
                 })
-                markers.append({"date": date, "type": "buy",
-                                "price": round(price, 3)})
+                # 买卖点画在复权K线上，所以标记价格用当日复权价，不能混真实价
+                markers.append({"date": date, "type": "buy", "price": round(adj_p, 3)})
+            else:
+                missed += 1
         elif side == "sell" and qty > 0:
-            amount = qty * price
+            amount = qty * raw_p
             fee = amount * fee_rate
             cash += amount - fee
             pnl = amount - fee - cost_basis - buy_fee
             trades.append({
                 "date": date, "side": "sell", "code": code, "qty": qty,
-                "price": round(price, 3), "amount": round(amount, 2),
+                "price": round(raw_p, 3), "amount": round(amount, 2),
                 "fee": round(fee, 2),
                 "pnl": round(pnl, 2),
                 "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
                 if cost_basis + buy_fee else None,
                 "reason": reason_by_date.get(date, ""),
             })
-            markers.append({"date": date, "type": "sell", "price": round(price, 3)})
-            qty = 0
+            markers.append({"date": date, "type": "sell", "price": round(adj_p, 3)})
+            qty = 0.0
 
     # liquidate open position at last close (marked separately)
     last = df.iloc[-1]
     final_equity = cash
     if qty > 0:
-        amount = qty * last["close"]
+        amount = qty * float(last["raw_close"])
         fee = amount * fee_rate
         pnl = amount - fee - cost_basis - buy_fee
         trades.append({
             "date": last["date"], "side": "sell", "code": code, "qty": qty,
-            "price": round(float(last["close"]), 3), "amount": round(amount, 2),
+            "price": round(float(last["raw_close"]), 3), "amount": round(amount, 2),
             "fee": round(fee, 2), "pnl": round(pnl, 2),
             "pnl_pct": round(pnl / (cost_basis + buy_fee) * 100, 2)
             if cost_basis + buy_fee else None,
@@ -204,6 +218,7 @@ def run_backtest(code: str, start: str, end: str, capital: float,
             "elapsed_sec": round(time.time() - t0, 3),
             "order_count": len(trades),
             "trade_count": sum(1 for t in trades if t["side"] == "buy"),
+            "missed_buy_signals": missed,
             "final_equity": round(final_equity, 2),
             "pnl": round(pnl_total, 2),
             "pnl_pct": round(pnl_total / capital * 100, 2) if capital else None,
@@ -253,6 +268,8 @@ def export_excel(report: dict) -> bytes:
         ("盈亏比例(%)", s["pnl_pct"]), ("手续费合计", s["fees_total"]),
         (f"大盘涨跌幅({s['index_name']},%)", s["index_pct"]),
         ("行业涨跌幅(%)", s["industry_pct"]),
+        ("信号因买不起一手被跳过", s["missed_buy_signals"]),
+        ("成交口径", "不复权真实价（一手=100股）；除权除息日按复权因子折算持股数，等价红利再投"),
     ]
     for i, (k, v) in enumerate(rows, 1):
         ws.cell(row=i, column=1, value=k).font = bold
@@ -269,7 +286,7 @@ def export_excel(report: dict) -> bytes:
     code_name = f"{report['code']} {report['stock_name']}"
     for t in report["trades"]:
         ws2.append([t["date"], code_name, "买入" if t["side"] == "buy" else "卖出",
-                    t["qty"], t["price"], t["amount"], t["fee"],
+                    round(t["qty"], 2), t["price"], t["amount"], t["fee"],
                     t["pnl"], t["pnl_pct"], t["reason"]])
     widths = [12, 18, 8, 14, 12, 14, 10, 12, 12, 24]
     for i, w in enumerate(widths):

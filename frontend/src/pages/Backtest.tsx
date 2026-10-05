@@ -12,7 +12,7 @@ interface Report {
   range: { start: string; end: string };
   capital: number; fee_rate: number;
   summary: {
-    elapsed_sec: number; order_count: number; trade_count: number;
+    elapsed_sec: number; order_count: number; trade_count: number; missed_buy_signals: number;
     final_equity: number; pnl: number; pnl_pct: number; fees_total: number;
     index_name: string; index_pct: number | null; industry_pct: number | null;
   };
@@ -172,6 +172,7 @@ function ReportView({ r }: { r: Report }) {
         {metric("回测耗时", `${s.elapsed_sec} 秒`)}
         {metric("买入笔数", `${s.trade_count} 笔`)}
         {metric("总委托数", `${s.order_count} 笔`)}
+        {metric("信号买不起一手", `${s.missed_buy_signals} 次`)}
         {metric("盈亏金额(扣费)", `${fmt.n(s.pnl)} 元`, pnlCls)}
         {metric("盈亏比例(扣费)", `${fmt.n(s.pnl_pct)}%`, pnlCls)}
         {metric(`${s.index_name}涨跌`, `${fmt.n(s.index_pct)}%`,
@@ -180,11 +181,19 @@ function ReportView({ r }: { r: Report }) {
           (s.industry_pct ?? 0) > 0 ? "up" : "down")}
       </div>
 
+      {s.missed_buy_signals > 0 && (
+        <div className="up" style={{ marginBottom: 12 }}>
+          有 {s.missed_buy_signals} 个买入信号因「一手（100 股）买不起」被跳过：
+          把初始资金调大，或换单价更低的股票再跑。
+        </div>
+      )}
+
       <div className="panel">
         <h3>{r.stock_name}({r.code}) K线 与买卖点 — {r.strategy.name}</h3>
         <div className="muted" style={{ fontSize: 12, marginTop: -6, marginBottom: 8 }}>
           回测区间 {r.range.start} ~ {r.range.end}｜实际K线 {r.stock_bars.length} 根
           （{r.stock_bars[0]?.date ?? "-"} ~ {r.stock_bars[r.stock_bars.length - 1]?.date ?? "-"}）
+          ｜成交价与金额按不复权真实价，曲线和买卖点按复权价
         </div>
         <KLineChart bars={r.stock_bars} markers={r.markers} showMA showVol height={540} />
       </div>
@@ -221,7 +230,7 @@ function ReportView({ r }: { r: Report }) {
                   <td className="l">{r.code} {r.stock_name}</td>
                   <td className="l"><span className={t.side === "buy" ? "up" : "down"}>
                     {t.side === "buy" ? "买入" : "卖出"}</span></td>
-                  <td>{fmt.n(t.qty, 0)}</td>
+                  <td>{fmt.n(t.qty, 2)}</td>
                   <td>{fmt.n(t.price, 3)}</td>
                   <td>{fmt.n(t.amount)}</td>
                   <td>{fmt.n(t.fee)}</td>
