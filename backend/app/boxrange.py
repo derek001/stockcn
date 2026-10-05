@@ -20,9 +20,10 @@
 - 年化斜率 = 对 ln(复权收盘) 关于**全市场交易日序号**做最小二乘，再 (exp(slope*250)-1) 年化。用全市场日历序号
   而不是「该股自身第几根 bar」，停牌缺口才会体现在时间轴上（实测无停牌个股两者完全相同，中位差 0.0000%）。
 - 挖坑 = 近 60 个交易日有**收盘**跌破密集带下沿，且现价又收回带内。
-- 「上市满 N 年」用首根日线日期判（`box_years`），要的是「有足够日线可算」而不是上市公告口径：
-  `stocks.list_date` 现已由在线刷新入库，但 5570 只有日线的股票里 39 只与首根日线不一致（33 只上市日更晚：29 个
-  920xxx 新三板平移代码 + 000001/000002/000505/600018；6 只首根更晚，最多差 33 天，都是 1990~1992 年的沪市老票）。
+- 「上市年限 `box_years`」按 2026-10-05 用户裁定：**优先 `stocks.list_date`（上市公告日，在线刷新入库）**，
+  接口没给日期的（最新 7 只新股）退回首根日线。两者在 5570 只有日线的股票里对不上 39 只（33 只上市日更晚：
+  29 个 920xxx 新三板平移代码 + 000001/000002/000505/600018；6 只首根更晚，最多差 33 天），这些按上市日算。
+  「横盘够不够久」的硬门槛是 `box_bars`（箱体段根数），与本字段无关。
 - `box_time_pct`（带内占比）按定义恒 ≥ dense_pct，只能展示/排序，不能当硬过滤。
 
 实现刻意不走 `screening.load_universe()` 的 pandas 路径：2250 交易日约 570 万行，全市场载入 Python 会拖到几分钟，
@@ -175,6 +176,14 @@ def _first_dates() -> dict[str, str]:
             db.query("SELECT code, MIN(date) AS d FROM kline_daily GROUP BY code")}
 
 
+def _start_dates() -> dict[str, str]:
+    """上市年限的起算日：优先 `stocks.list_date`，接口没给日期的（最新几只新股）退回首根日线。"""
+    out = _first_dates()
+    for r in db.query("SELECT code, list_date FROM stocks WHERE list_date IS NOT NULL"):
+        out[r["code"]] = r["list_date"]
+    return out
+
+
 def _years_between(d1: str, d2: str) -> float | None:
     try:
         a = dt.date.fromisoformat(d1)
@@ -258,7 +267,7 @@ def compute(find_days: int = DEFAULT_FIND_DAYS,
         conn.commit()
 
     bottom_date = {c: bd for c, bd, _ in bottoms}
-    first = _first_dates()
+    starts = _start_dates()
     out: dict[str, dict] = {}
     for r in agg:
         code = r["code"]
@@ -299,7 +308,7 @@ def compute(find_days: int = DEFAULT_FIND_DAYS,
             "box_bottom_date": bottom_date.get(code),
             "box_decline_pre": round(decline, 1) if decline is not None else None,
             "box_years": (lambda v: round(v, 1) if v is not None else None)(
-                _years_between(first.get(code, ""), base)),
+                _years_between(starts.get(code, ""), base)),
         }
 
     if len(_cache) >= _CACHE_MAX:

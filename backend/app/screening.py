@@ -51,7 +51,7 @@ BOX_FIELDS = [
     {"field": "box_rebound", "label": "现价÷段内最低收盘(倍)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_decline_pre", "label": "出清回撤%(箱底前3年最高÷箱底)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_dip_60d", "label": "近60日挖坑后收回(1是0否)", "type": "number", "ops": [">=", "<="]},
-    {"field": "box_years", "label": "上市年限(按首根日线)", "type": "number", "ops": [">=", "<="]},
+    {"field": "box_years", "label": "上市年限(优先上市日期,缺则首根日线)", "type": "number", "ops": [">=", "<="]},
     {"field": "box_bars", "label": "箱体段交易日数", "type": "number", "ops": [">=", "<="]},
 ]
 
