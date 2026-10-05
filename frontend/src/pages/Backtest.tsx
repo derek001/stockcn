@@ -26,6 +26,7 @@ interface StrategyMeta {
 
 export default function Backtest({ initialCode }: { initialCode?: string }) {
   const [code, setCode] = useState(initialCode ?? "600519");
+  const [mode, setMode] = useState<"years" | "dates">("years");
   const [years, setYears] = useState(10);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -54,12 +55,19 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
     if (chosen) setParams(Object.fromEntries(chosen.params_schema.map((p) => [p.key, p.default])));
   }, [sid]); // eslint-disable-line
 
+  const today = ymd(new Date());
+  const effStart = mode === "years" ? minusYears(today, years) : start;
+  const effEnd = mode === "years" ? today : (end || today);
+  // 区间不成立的两类情况都拦在按钮上，别把「跑错段」留给用户猜
+  const rangeMsg = mode === "dates" && !start ? "还没选开始日期"
+    : effEnd <= effStart ? `结束日期 ${effEnd} 不晚于开始日期 ${effStart}` : "";
+
   const run = async () => {
     setBusy(true); setErr(""); setReport(null);
     try {
       const r = await api.post<Report>("/api/backtest", {
         code: code.trim(), strategy_id: sid, capital, fee_rate: feeRate,
-        start: start || defaultStart(years), end: end || "", params,
+        start: effStart, end: effEnd, params,
       });
       setReport(r);
     } catch (e) { setErr((e as Error).message); }
@@ -74,18 +82,30 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
           <label className="field">股票代码
             <input style={{ width: 110 }} value={code} onChange={(e) => setCode(e.target.value)} />
           </label>
-          <label className="field">默认年数
-            <select value={years} disabled={!!start}
-              onChange={(e) => setYears(Number(e.target.value))}>
-              {[1, 3, 5, 10].map((y) => <option key={y} value={y}>{y} 年</option>)}
-            </select>
-          </label>
-          <label className="field">开始日期(可空)
-            <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
-          </label>
-          <label className="field">结束日期(可空)
-            <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
-          </label>
+          <div className="field">回测区间
+            <span className="row" style={{ gap: 6 }}>
+              <input type="radio" name="range-mode" id="rm-years"
+                checked={mode === "years"} onChange={() => setMode("years")} />
+              <label htmlFor="rm-years">最近</label>
+              <select value={years} disabled={mode !== "years"}
+                onChange={(e) => setYears(Number(e.target.value))}>
+                {[1, 3, 5, 10].map((y) => <option key={y} value={y}>{y} 年</option>)}
+              </select>
+              <input type="radio" name="range-mode" id="rm-dates"
+                checked={mode === "dates"} onChange={() => setMode("dates")} />
+              <label htmlFor="rm-dates">指定日期</label>
+            </span>
+          </div>
+          {mode === "dates" && <>
+            <label className="field" htmlFor="bt-start">开始日期
+              <input id="bt-start" type="date" value={start}
+                onChange={(e) => setStart(e.target.value)} />
+            </label>
+            <label className="field" htmlFor="bt-end">结束日期(不填=今天)
+              <input id="bt-end" type="date" value={end}
+                onChange={(e) => setEnd(e.target.value)} />
+            </label>
+          </>}
           <label className="field">初始资金(元)
             <input type="number" style={{ width: 140 }} value={capital}
               onChange={(e) => setCapital(Number(e.target.value))} />
@@ -107,10 +127,15 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
           ))}
         </div>
         <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn primary" onClick={run} disabled={busy || !sid}>
+          <button className="btn primary" onClick={run} disabled={busy || !sid || !!rangeMsg}>
             {busy ? "回测运行中…" : "开始回测"}
           </button>
-          <span className="muted">区间缺省为最近 {years} 年，默认资金 100 万，手续费 0.03%。</span>
+          <span className="muted">
+            {rangeMsg
+              ? `先补全日期才能回测：${rangeMsg}。`
+              : `本次区间 ${effStart} ~ ${effEnd}（${mode === "years" ? `最近 ${years} 年` : "指定日期"}）。`}
+            默认资金 100 万，手续费 0.03%。
+          </span>
           {err && <span className="up">{err}</span>}
         </div>
       </div>
@@ -120,10 +145,16 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
   );
 }
 
-function defaultStart(years: number): string {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() - years);
-  return d.toISOString().slice(0, 10);
+function ymd(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function minusYears(iso: string, years: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const t = new Date(y, m - 1, d);
+  t.setFullYear(t.getFullYear() - years);
+  return ymd(t);
 }
 
 function ReportView({ r }: { r: Report }) {
@@ -151,6 +182,10 @@ function ReportView({ r }: { r: Report }) {
 
       <div className="panel">
         <h3>{r.stock_name}({r.code}) K线 与买卖点 — {r.strategy.name}</h3>
+        <div className="muted" style={{ fontSize: 12, marginTop: -6, marginBottom: 8 }}>
+          回测区间 {r.range.start} ~ {r.range.end}｜实际K线 {r.stock_bars.length} 根
+          （{r.stock_bars[0]?.date ?? "-"} ~ {r.stock_bars[r.stock_bars.length - 1]?.date ?? "-"}）
+        </div>
         <KLineChart bars={r.stock_bars} markers={r.markers} showMA showVol height={540} />
       </div>
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
