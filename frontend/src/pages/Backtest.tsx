@@ -25,35 +25,57 @@ interface StrategyMeta {
   params_schema: { key: string; label: string; type: string; default: number }[];
 }
 
-export default function Backtest({ initialCode }: { initialCode?: string }) {
-  const [code, setCode] = useState(initialCode ?? "600519");
-  const [mode, setMode] = useState<"years" | "dates">("years");
+/** 从【全市场回测】点一行带过来的那一轮口径，带过来就照原样复现这只 */
+export interface DrillDown {
+  code: string; strategy_id: string; params: Record<string, number>;
+  start: string; end: string; capital: number; fee_rate: number;
+}
+
+export default function Backtest({ initialCode, from }:
+  { initialCode?: string; from?: DrillDown }) {
+  const [code, setCode] = useState(from?.code ?? initialCode ?? "600519");
+  const [mode, setMode] = useState<"years" | "dates">(from ? "dates" : "years");
   const [years, setYears] = useState(10);
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
-  const [capital, setCapital] = useState(1000000);
-  const [feeRate, setFeeRate] = useState(0.0003);
+  const [start, setStart] = useState(from?.start ?? "");
+  const [end, setEnd] = useState(from?.end ?? "");
+  const [capital, setCapital] = useState(from?.capital ?? 1000000);
+  const [feeRate, setFeeRate] = useState(from?.fee_rate ?? 0.0003);
   const [strategies, setStrategies] = useState<StrategyMeta[]>([]);
-  const [sid, setSid] = useState("");
-  const [params, setParams] = useState<Record<string, number>>({});
+  const [sid, setSid] = useState(from?.strategy_id ?? "");
+  const [params, setParams] = useState<Record<string, number>>(from?.params ?? {});
   const [report, setReport] = useState<Report | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [fromMsg, setFromMsg] = useState("");
+  const [autoRun, setAutoRun] = useState(!!from);
+
+  const defaultsOf = (s: StrategyMeta) =>
+    Object.fromEntries(s.params_schema.map((p) => [p.key, p.default]));
 
   useEffect(() => {
     api.get<StrategyMeta[]>("/api/strategies").then((ls) => {
       const on = ls.filter((s) => s.enabled);
       setStrategies(on);
+      const hit = on.find((s) => from && s.id === from.strategy_id);
+      if (hit) {
+        // 参数先按 schema 补齐再覆盖，那一轮记录少键时不会把 undefined 传给后端
+        setParams({ ...defaultsOf(hit), ...from?.params });
+        return;
+      }
+      if (from) {
+        setFromMsg(`那一轮用的策略 ${from.strategy_id} 现在没启用，没法自动复现这一只。` +
+          `自己选一个策略、把区间改成 ${from.start} ~ ${from.end}，再点开始回测。`);
+      }
       if (on.length && !on.some((s) => s.id === sid)) {
         setSid(on[0].id);
-        setParams(Object.fromEntries(on[0].params_schema.map((p) => [p.key, p.default])));
+        setParams(defaultsOf(on[0]));
       }
     });
   }, []); // eslint-disable-line
 
   const chosen = useMemo(() => strategies.find((s) => s.id === sid), [strategies, sid]);
   useEffect(() => {
-    if (chosen) setParams(Object.fromEntries(chosen.params_schema.map((p) => [p.key, p.default])));
+    if (chosen) setParams(defaultsOf(chosen));
   }, [sid]); // eslint-disable-line
 
   const today = ymd(new Date());
@@ -74,6 +96,15 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
     } catch (e) { setErr((e as Error).message); }
     setBusy(false);
   };
+
+  // 点过来的那一轮：等策略列表和参数就位后自动跑一次，不用再点按钮
+  useEffect(() => {
+    if (!autoRun || !strategies.length) return;
+    setAutoRun(false);
+    if (fromMsg) return;
+    if (rangeMsg) { setErr(`带过来的区间在这页不成立，改完日期自己点开始回测：${rangeMsg}`); return; }
+    void run();
+  }, [autoRun, strategies, fromMsg]); // eslint-disable-line
 
   return (
     <>
@@ -135,8 +166,11 @@ export default function Backtest({ initialCode }: { initialCode?: string }) {
             {rangeMsg
               ? `先补全日期才能回测：${rangeMsg}。`
               : `本次区间 ${effStart} ~ ${effEnd}（${mode === "years" ? `最近 ${years} 年` : "指定日期"}）。`}
-            默认资金 100 万，手续费 0.03%。
+            {from && !fromMsg
+              ? "这一只是从【全市场回测】点过来的，策略、参数、区间、资金都按那一轮填好并已自动跑了一次；改动任何一项之后要再点一次开始回测。"
+              : "默认资金 100 万，手续费 0.03%。"}
           </span>
+          {fromMsg && <span className="up">{fromMsg}</span>}
           {err && <span className="up">{err}</span>}
         </div>
       </div>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import KLineChart, { Bar } from "../KLineChart";
 import { api, fmt } from "../api";
 import { minusYears, ymd } from "../util";
+import type { DrillDown } from "./Backtest";
 
 interface StrategyMeta {
   id: string; name: string; enabled: boolean;
@@ -84,7 +85,7 @@ function curveBars(c?: Curve | null): Bar[] {
   return c.dates.map((d, i) => ({ date: d, close: c.eq[i] }));
 }
 
-export default function BatchBacktest({ onBacktest }: { onBacktest: (code: string) => void }) {
+export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDown) => void }) {
   const [mode, setMode] = useState<"years" | "dates">("years");
   const [years, setYears] = useState(10);
   const [start, setStart] = useState("");
@@ -210,7 +211,7 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (code: strin
         <p className="muted" style={{ marginTop: 0 }}>
           不用输股票代码：选一个策略，把本地库里所有有日线的股票各跑一遍（每只单独给同样的初始资金）。
           出来的是一张成绩单——多少只赚钱、分布长什么样、跑赢买入持有的有几只，再按股票排名，
-          点某一行可以看这只的单只回测明细（K线、买卖点、逐笔成交）。
+          点某一行会连着这一轮的策略、参数、区间一起跳到【回测】页，自动把这只跑出来（K线、买卖点、逐笔成交）。
         </p>
         <div className="row">
           <div className="field">回测区间
@@ -462,7 +463,7 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (code: strin
               </button>
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              点表头换排序（默认按超额收益从高到低），点一行去【回测】页看这只的K线买卖点和逐笔明细。
+              点表头换排序（默认按超额收益从高到低），点一行去【回测】页：这一轮的策略、参数、区间、资金会原样带过去并自动跑一次。
             </div>
             <div className="table-wrap" style={{ marginTop: 8 }}>
               <table>
@@ -477,7 +478,12 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (code: strin
                 </tr></thead>
                 <tbody>
                   {(res?.rows ?? []).map((r) => (
-                    <tr key={r.code} onClick={() => onBacktest(r.code)} style={{ cursor: "pointer" }}>
+                    <tr key={r.code} style={{ cursor: "pointer" }}
+                      onClick={() => onBacktest({
+                        code: r.code, strategy_id: head.strategy_id, params: head.params,
+                        start: head.start, end: head.end,
+                        capital: head.capital, fee_rate: head.fee_rate,
+                      })}>
                       <td className="l">{r.code}</td>
                       <td className="l">{r.name}</td>
                       <td className="l">{r.industry || "-"}</td>

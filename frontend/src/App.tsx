@@ -6,7 +6,7 @@ import Screener from "./pages/Screener";
 import AutoScreener from "./pages/AutoScreener";
 import Selectors from "./pages/Selectors";
 import Strategies from "./pages/Strategies";
-import Backtest from "./pages/Backtest";
+import Backtest, { DrillDown } from "./pages/Backtest";
 import BatchBacktest from "./pages/BatchBacktest";
 
 type View =
@@ -17,7 +17,7 @@ type View =
   | { page: "auto" }
   | { page: "selector" }
   | { page: "strategies" }
-  | { page: "backtest"; code?: string }
+  | { page: "backtest"; code?: string; from?: DrillDown }
   | { page: "batch" };
 
 const NAV: { key: View["page"]; label: string }[] = [
@@ -65,9 +65,9 @@ export default function App() {
         {view.page === "auto" && <AutoScreener onOpenStock={(c) => setView({ page: "stock", code: c })} />}
         {view.page === "selector" && <Selectors onOpenStock={(c) => setView({ page: "stock", code: c })} />}
         {view.page === "strategies" && <Strategies />}
-        {view.page === "backtest" && <Backtest initialCode={view.code} />}
+        {view.page === "backtest" && <Backtest initialCode={view.code} from={view.from} />}
         {view.page === "batch" && (
-          <BatchBacktest onBacktest={(c) => setView({ page: "backtest", code: c })} />
+          <BatchBacktest onBacktest={(d) => setView({ page: "backtest", from: d })} />
         )}
       </div>
     </>
