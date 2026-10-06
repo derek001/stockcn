@@ -85,27 +85,44 @@ function curveBars(c?: Curve | null): Bar[] {
   return c.dates.map((d, i) => ({ date: d, close: c.eq[i] }));
 }
 
+/** 切到别的页面时记住的这一页状态，回来原样接上（含已打开的批次和它的排序/翻页/搜索） */
+interface Keep {
+  mode: "years" | "dates"; years: number; start: string; end: string;
+  capital: number; feeRate: number; sid: string;
+  params: Record<string, number>;
+  bid: string; sort: string; desc: boolean; offset: number; q: string;
+  distKey: string; topN: number;
+  res: ResultRes | null; topCurve: CurveRes | null;
+}
+
+// 这个 SPA 没有 URL 路由，页面靠卸载/重挂载切换，所以状态只能挂在这里活过一次卸载
+let keep: Keep | null = null;
+
+const defaultsOf = (s: StrategyMeta) =>
+  Object.fromEntries(s.params_schema.map((p) => [p.key, p.default]));
+
 export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDown) => void }) {
-  const [mode, setMode] = useState<"years" | "dates">("years");
-  const [years, setYears] = useState(10);
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
-  const [capital, setCapital] = useState(1000000);
-  const [feeRate, setFeeRate] = useState(0.0003);
+  const seed = keep;
+  const [mode, setMode] = useState<"years" | "dates">(seed?.mode ?? "years");
+  const [years, setYears] = useState(seed?.years ?? 10);
+  const [start, setStart] = useState(seed?.start ?? "");
+  const [end, setEnd] = useState(seed?.end ?? "");
+  const [capital, setCapital] = useState(seed?.capital ?? 1000000);
+  const [feeRate, setFeeRate] = useState(seed?.feeRate ?? 0.0003);
   const [strategies, setStrategies] = useState<StrategyMeta[]>([]);
-  const [sid, setSid] = useState("");
-  const [params, setParams] = useState<Record<string, number>>({});
+  const [sid, setSid] = useState(seed?.sid ?? "");
+  const [params, setParams] = useState<Record<string, number>>(seed?.params ?? {});
   const [st, setSt] = useState<Status | null>(null);
   const [batches, setBatches] = useState<BatchLite[]>([]);
-  const [bid, setBid] = useState("");
-  const [res, setRes] = useState<ResultRes | null>(null);
-  const [sort, setSort] = useState("excess_pct");
-  const [desc, setDesc] = useState(true);
-  const [offset, setOffset] = useState(0);
-  const [q, setQ] = useState("");
-  const [distKey, setDistKey] = useState("pnl");
-  const [topN, setTopN] = useState(20);
-  const [topCurve, setTopCurve] = useState<CurveRes | null>(null);
+  const [bid, setBid] = useState(seed?.bid ?? "");
+  const [res, setRes] = useState<ResultRes | null>(seed?.res ?? null);
+  const [sort, setSort] = useState(seed?.sort ?? "excess_pct");
+  const [desc, setDesc] = useState(seed?.desc ?? true);
+  const [offset, setOffset] = useState(seed?.offset ?? 0);
+  const [q, setQ] = useState(seed?.q ?? "");
+  const [distKey, setDistKey] = useState(seed?.distKey ?? "pnl");
+  const [topN, setTopN] = useState(seed?.topN ?? 20);
+  const [topCurve, setTopCurve] = useState<CurveRes | null>(seed?.topCurve ?? null);
   const [err, setErr] = useState("");
   const prevStatus = useRef("");
 
@@ -119,15 +136,30 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
     api.get<StrategyMeta[]>("/api/strategies").then((ls) => {
       const on = ls.filter((s) => s.enabled);
       setStrategies(on);
-      if (on.length) {
-        setSid(on[0].id);
-        setParams(Object.fromEntries(on[0].params_schema.map((p) => [p.key, p.default])));
-      }
+      // 回来的那一次：策略还在启用列表里就接着用，参数先按 schema 补齐再覆盖
+      const hit = on.find((s) => s.id === seed?.sid);
+      if (hit) { setParams({ ...defaultsOf(hit), ...seed?.params }); return; }
+      if (on.length) { setSid(on[0].id); setParams(defaultsOf(on[0])); }
     }).catch((e) => setErr((e as Error).message));
-  }, []);
+  }, []); // eslint-disable-line
   useEffect(() => {
-    if (chosen) setParams(Object.fromEntries(chosen.params_schema.map((p) => [p.key, p.default])));
+    if (chosen) setParams(defaultsOf(chosen));
   }, [sid]); // eslint-disable-line
+
+  // 每次渲染把当前状态记下来，卸载时留给下一次挂载
+  const live = useRef<Keep | null>(null);
+  live.current = {
+    mode, years, start, end, capital, feeRate, sid, params,
+    bid, sort, desc, offset, q, distKey, topN, res, topCurve,
+  };
+  useEffect(() => () => { if (live.current) keep = live.current; }, []); // eslint-disable-line
+
+  // 接上离开前的批次：先把这一屏按原样重取一遍（结果先用上次的，拉到就换）
+  useEffect(() => {
+    if (!seed?.bid) return;
+    loadResult(seed.bid, seed.sort, seed.desc, seed.offset, seed.q);
+    loadCurve(seed.bid, seed.topN);
+  }, []); // eslint-disable-line
 
   const loadList = () =>
     api.get<{ batches: BatchLite[] }>("/api/backtest/batch/list")
@@ -464,6 +496,7 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
               点表头换排序（默认按超额收益从高到低），点一行去【回测】页：这一轮的策略、参数、区间、资金会原样带过去并自动跑一次。
+              中途切去看别的页面再回来，这一页填的区间、资金、策略参数，连同已打开的批次和它的排序、页码、搜索条件都还在。
             </div>
             <div className="table-wrap" style={{ marginTop: 8 }}>
               <table>
