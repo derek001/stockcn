@@ -21,6 +21,8 @@ MIN_BARS = 30
 CHUNK = 400
 STATUS_KEY = "bt_batch_status"
 TOP_N_ALLOWED = (20, 50, 100)
+# 一次批次 = 5545 行逐只成绩单 ≈ 2MB，留太多只是在长胖：每次跑批后只留最近这些个
+KEEP_BATCHES = 20
 
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
@@ -300,11 +302,13 @@ def _persist(batch_id: str, strategy_id: str, strategy_name: str, params: dict,
                 "INSERT INTO bt_batch_item (batch_id, code, name, industry, bars, buy_count,"
                 " order_count, missed, pnl_pct, bh_pct, excess_pct, max_dd_pct, fees, years)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", items)
+        stale = prune(conn)
     _progress(status="done", progress=len(items), total=len(items), batch_id=batch_id,
-              message=f"跑完 {len(items)} 只，耗时 {time.time()-t0:.0f}s")
+              message=f"跑完 {len(items)} 只，耗时 {time.time()-t0:.0f}s"
+                      + (f"，清掉 {len(stale)} 个超期批次（只留最近 {KEEP_BATCHES} 个）" if stale else ""))
 
 
-def list_batches(limit: int = 30) -> list[dict]:
+def list_batches(limit: int = KEEP_BATCHES) -> list[dict]:
     rows = db.query(
         "SELECT id, run_at, strategy_id, strategy_name, params, start, end, capital,"
         " fee_rate, stock_count, skipped, elapsed_sec FROM bt_batch "
@@ -321,6 +325,40 @@ def get_batch(batch_id: str) -> dict | None:
     row["params"] = json.loads(row["params"] or "{}")
     row["summary"] = json.loads(row["summary"] or "{}")
     return row
+
+
+def prune(conn, keep: int = KEEP_BATCHES) -> list[str]:
+    """只留最近 keep 个批次（按 run_at 倒序），返回被清掉的批次号。
+
+    跟本次写入同一个事务，所以不会出现「批次头在、成绩单被清掉」的半截状态。
+    """
+    stale = [r[0] for r in conn.execute(
+        "SELECT id FROM bt_batch ORDER BY run_at DESC, id DESC LIMIT -1 OFFSET ?", (keep,))]
+    for sid in stale:
+        conn.execute("DELETE FROM bt_batch_item WHERE batch_id=?", (sid,))
+        conn.execute("DELETE FROM bt_batch WHERE id=?", (sid,))
+    return stale
+
+
+def delete(batch_id: str) -> dict:
+    """删掉一批留痕（批次头 + 逐只成绩单），只动这两张表，日线库不碰。
+
+    跑批进行中不删：那一批的成绩单要在跑完时才整批写进来，中途删了等于白跑。
+    """
+    st = status()
+    if st["status"] == "running":
+        return {"error": "全市场回测正在跑，等这一次跑完再删批次"}
+    head = db.query_one(
+        "SELECT id, strategy_name, start, end, capital, stock_count FROM bt_batch WHERE id=?",
+        (batch_id,))
+    if not head:
+        return {"error": f"批次 {batch_id} 已经不在库里了，重新选一个批次"}
+    with db.transaction() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM bt_batch_item WHERE batch_id=?",
+                         (batch_id,)).fetchone()[0]
+        conn.execute("DELETE FROM bt_batch_item WHERE batch_id=?", (batch_id,))
+        conn.execute("DELETE FROM bt_batch WHERE id=?", (batch_id,))
+    return {"deleted": batch_id, "items": n, "batch": head}
 
 
 def items(batch_id: str, sort: str = "excess_pct", desc: bool = True,

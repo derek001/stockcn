@@ -114,6 +114,7 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
   const [params, setParams] = useState<Record<string, number>>(seed?.params ?? {});
   const [st, setSt] = useState<Status | null>(null);
   const [batches, setBatches] = useState<BatchLite[]>([]);
+  const [keepN, setKeepN] = useState(0);
   const [bid, setBid] = useState(seed?.bid ?? "");
   const [res, setRes] = useState<ResultRes | null>(seed?.res ?? null);
   const [sort, setSort] = useState(seed?.sort ?? "excess_pct");
@@ -162,8 +163,8 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
   }, []); // eslint-disable-line
 
   const loadList = () =>
-    api.get<{ batches: BatchLite[] }>("/api/backtest/batch/list")
-      .then((r) => setBatches(r.batches));
+    api.get<{ batches: BatchLite[]; keep: number }>("/api/backtest/batch/list")
+      .then((r) => { setBatches(r.batches); setKeepN(r.keep); });
 
   const loadResult = (id: string, s: string, d: boolean, o: number, kw: string) =>
     api.get<ResultRes>(
@@ -183,6 +184,18 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
     setTopCurve(null);
     loadResult(id, "excess_pct", true, 0, "");
     loadCurve(id, topN);
+  };
+
+  const delBatch = async () => {
+    const h = batches.find((b) => b.id === bid);
+    if (!bid || !h) return;
+    if (!window.confirm(`删除批次 ${bid}？这一批 ${h.stock_count} 只的成绩单会一起清掉，`
+      + "删了不能恢复（日线库不动，要的话重跑一次全市场回测就有）。")) return;
+    try {
+      await api.del(`/api/backtest/batch?batch_id=${encodeURIComponent(bid)}`);
+      setBid(""); setRes(null); setTopCurve(null); setErr("");
+      void loadList();
+    } catch (e) { setErr((e as Error).message); }
   };
 
   // 只有跑批进行中才轮询进度：启动跑批后 bump 一次把轮询链接上，跑完自动停
@@ -327,8 +340,15 @@ export default function BatchBacktest({ onBacktest }: { onBacktest: (d: DrillDow
               </option>
             ))}
           </select>
+          <button className="btn" disabled={!bid || running} onClick={delBatch}>
+            删除这一批
+          </button>
           <span style={{ flex: 1 }} />
-          <span className="muted">{batches.length} 个批次留痕</span>
+          <span className="muted">
+            {batches.length} 个批次留痕
+            {keepN ? `（每次跑完只留最近 ${keepN} 个，更早的自动清掉）` : ""}
+            {running ? "｜跑批进行中不能删批次" : ""}
+          </span>
         </div>
         {head && (
           <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>

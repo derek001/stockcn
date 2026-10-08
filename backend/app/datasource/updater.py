@@ -70,6 +70,20 @@ def _status_key(kind: str) -> str:
     return "local" if kind in LOCAL_KINDS else kind
 
 
+def _orphan_stage_tables(importing: bool) -> list[str]:
+    """全量导入的中转表：正常收尾会 RENAME 成 kline_daily 并 DROP 掉旧表。
+
+    留在库里就说明上一次全量导入中途断了（它跟整份日线库一样大）。
+    这里只报不删——半成品表可能正是唯一可用的那份，删不删由操作者在页面上决定。
+    """
+    if importing:
+        return []
+    rows = db.query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?) "
+        "ORDER BY name", ("kline_stage", "kline_daily_old"))
+    return [r["name"] for r in rows]
+
+
 def get_status() -> dict:
     st = _norm(db.kv_get("data_status", _default_status()))
     with _status_lock:
@@ -79,6 +93,7 @@ def get_status() -> dict:
         if kind not in active and st[kind].get("status") == "running":
             st[kind] = {**_job_state(), "status": "error",
                         "message": "任务已中断（服务重启）", "time": st[kind].get("time")}
+    st["orphan_tables"] = _orphan_stage_tables("local" in active)
     if not st.get("running"):
         row = db.query_one("SELECT COUNT(*) AS n FROM kline_daily")
         st["kline_rows"] = row["n"] if row else 0

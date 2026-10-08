@@ -388,8 +388,16 @@ def batch_status():
 
 
 @app.get("/api/backtest/batch/list")
-def batch_list(limit: int = Query(30, ge=1, le=200)):
-    return {"batches": bt_batch.list_batches(limit)}
+def batch_list(limit: int = Query(bt_batch.KEEP_BATCHES, ge=1, le=200)):
+    return {"batches": bt_batch.list_batches(limit), "keep": bt_batch.KEEP_BATCHES}
+
+
+@app.delete("/api/backtest/batch")
+def batch_delete(batch_id: str = Query(...)):
+    got = bt_batch.delete(batch_id)
+    if got.get("error"):
+        raise HTTPException(400, got["error"])
+    return got
 
 
 @app.get("/api/backtest/batch/result")

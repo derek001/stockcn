@@ -8,6 +8,7 @@ interface Status {
   qmt_path_raw: string | null; qmt_path_geo: string | null;
   stock_count: number; running: string[]; last_full: string | null;
   last_incremental: string | null; last_local: string | null; kline_rows?: number;
+  orphan_tables?: string[];
 }
 interface Preview {
   raw_path: string; geo_path: string;
@@ -155,6 +156,12 @@ export default function DataCenter() {
           注意：只认「不复权 + 等比后复权」这一对，<strong>不要选「后复权」，也不要选「前复权 / 等比前复权」</strong>；
           两份必须是同一天导的。盘中导出的话当天那根数据不全，等结算后重导一次即可（增量导入会重写最新一天，不会留下错数据）。
         </p>
+        {!!st.orphan_tables?.length && (
+          <p className="up" style={{ marginTop: 0 }}>
+            {`上一次「全量导入」中途断了：库里还留着中转表 ${st.orphan_tables.join(" / ")}，`
+              + "它和整份日线库一样大、正占着磁盘。请在下面重跑一次「全量导入」，跑完会自动清掉。"}
+          </p>
+        )}
         <div className="row">
           <span style={{ width: 92 }} className="muted">不复权目录</span>
           <input style={{ flex: 1, minWidth: 260 }} value={pathRaw}
