@@ -299,32 +299,38 @@ def _refresh_listing_dates(kind: str) -> int:
 
 
 def _supplement_missing_stocks(kind: str) -> int:
-    """把两条主列表来源都漏掉的股票（科创板、北交所）从东财财报接口补进 stocks。
+    """把两条主列表来源都漏掉的股票（科创板、北交所）补进 stocks，并补上它们与滞后股票的快照。
 
-    本机连不上东财 push2，列表只能来自腾讯板块成分股，而腾讯的排行接口只覆盖 4606 只
-    沪深A股；QMT 导入又按 stocks 白名单过滤文件，688/920/8xx 的导出会被静默丢掉。
+    腾讯板块成分股只覆盖 4606 只沪深A股，688/920 靠财报花名册进库后「不在 stocks」就再也不成立，
+    于是往后每一轮刷新都没人给这批股票写快照（2026-10-10 实测滞后 971 只）——判据必须带上
+    「本轮快照拿到了没有」，只看在不在 stocks 会漏。
     """
-    _update(kind, message="补录缺失板块股票列表…")
+    _update(kind, message="补录缺失板块股票与滞后快照…")
     try:
         roster = em.fetch_stock_roster(_recent_quarters(2))
     except Exception:
-        return 0
-    have = {r["code"] for r in db.query("SELECT code FROM stocks")}
-    missing = [r for r in roster if r["code"] not in have]
-    if not missing:
+        roster = []
+    have = {r["code"]: r["market"] for r in db.query("SELECT code,market FROM stocks")}
+    # 按每只自己的报价日期比，休市日/停牌才不会整批误判成滞后
+    today = tc.market_trade_date() or dt.date.today().isoformat()
+    fresh = {r["code"] for r in db.query(
+        "SELECT code FROM fundamentals WHERE trade_date=?", (today,))}
+    new_rows = [r for r in roster if r["code"] not in have]
+    stale = [{"code": c, "market": m} for c, m in sorted(have.items()) if c not in fresh]
+    if not new_rows and not stale:
         return 0
     quotes: dict[str, dict] = {}
     try:
-        quotes = tc.fetch_quotes([(r["code"], r["market"]) for r in missing])
+        quotes = tc.fetch_quotes([(r["code"], r["market"]) for r in new_rows + stale])
     except Exception:
         quotes = {}
-    db.execute(_STOCK_UPSERT, many=[
-        {"code": r["code"], "name": r["name"] or quotes.get(r["code"], {}).get("name") or "",
-         "market": r["market"], "secid": em.secid_for(r["code"]), "industry": r["industry"],
-         "board_code": None, "list_date": None, "is_active": 1} for r in missing])
-    today = dt.date.today().isoformat()
+    if new_rows:
+        db.execute(_STOCK_UPSERT, many=[
+            {"code": r["code"], "name": r["name"] or quotes.get(r["code"], {}).get("name") or "",
+             "market": r["market"], "secid": em.secid_for(r["code"]), "industry": r["industry"],
+             "board_code": None, "list_date": None, "is_active": 1} for r in new_rows])
     frows = []
-    for r in missing:
+    for r in new_rows + stale:
         q = quotes.get(r["code"])
         if not q or not q["price"]:
             continue
@@ -335,8 +341,9 @@ def _supplement_missing_stocks(kind: str) -> int:
                       "turnover_rate": q["turnover_rate"], "amount": q["amount"]})
     if frows:
         db.execute(_FUND_UPSERT, many=frows)
-    _update(kind, message=f"补录缺失板块股票 {len(missing)} 只（快照 {len(frows)} 只）")
-    return len(missing)
+    _update(kind, message=f"补录股票 {len(new_rows)} 只、写快照 {len(frows)} 只"
+                          f"（在册 {len(have)} 只里 {len(stale)} 只快照滞后或没有）")
+    return len(new_rows)
 
 
 # ---------- boards (EM path) ----------
@@ -626,30 +633,56 @@ def _local_full(kind: str, files: dict, shares: dict[str, float]) -> None:
 
 
 def _local_incremental(kind: str, files: dict, shares: dict[str, float]) -> None:
-    last = {r["code"]: r["d"] for r in db.query(
-        "SELECT code, MAX(date) AS d FROM kline_daily GROUP BY code")}
+    """增量导入：写「库里没有的日期」「库里复权因子/涨跌幅为空、这次能补上的行」和「各股末根」。
+
+    补空位是为了让「宽窗口重导」能把历史补上：等比那份坏掉的股票先按不复权入库
+    （adj_factor 留 NULL），等 QMT 重导好再增量一次即自动补齐复权口径，不用回退到全量导入；
+    上一根的因子补上之后，它后面那根的涨跌幅也算得出来了，同一次导入一并写回。
+    库里已有复权因子的历史行一律不动（末根除外），避免把旧批次的正确值倒退回 NULL。
+    """
     total = len(files)
-    done = failed = added = 0
+    done = failed = added = filled = no_factor = 0
     for code, (raw_p, geo_p) in files.items():
         try:
             bars, _stats = qmt_src.read_pair(raw_p, geo_p)
         except Exception:
             failed += 1
             bars = []
-        cutoff = last.get(code)
-        if cutoff:
-            # 含 cutoff 当天：末根若是盘中导出的快照，重新导出后可以在这里覆盖修正
-            bars = [b for b in bars if b["date"] >= cutoff]
         if bars:
+            # 只看文件覆盖到的这段：库里已有的历史行只有「空位」才动
+            have = {r["date"]: (r["adj_factor"], r["pct_chg"]) for r in db.query(
+                "SELECT date,adj_factor,pct_chg FROM kline_daily WHERE code=? AND date>=?",
+                (code, bars[0]["date"]))}
+            cutoff = max(have) if have else ""
             fs = shares.get(code)
-            db.execute(_KLINE_INSERT,
-                       many=[_bar_row(code, b, fs) for b in bars])
-            added += len(bars)
+            keep = []
+            for b in bars:
+                old = have.get(b["date"])
+                write = False
+                if old is None:
+                    write = True                     # 库里没有这一天：新股整文件入库 / 补历史缺日
+                elif b["date"] == cutoff and (b["adj_factor"] is not None or old[0] is None):
+                    write = True                     # 末根允许覆盖（盘中导出的那根会自愈），但不擦已有因子
+                elif old[0] is None and b["adj_factor"] is not None:
+                    write = True                     # 库里这根缺复权因子，这次补上
+                elif old[1] is None and b["pct_chg"] is not None:
+                    write = True                     # 补齐上一根的因子后，这根才算得出涨跌幅
+                if write:
+                    if old is not None and old[0] is None and b["adj_factor"] is not None:
+                        filled += 1
+                    keep.append(b)
+            if keep:
+                db.execute(_KLINE_INSERT, many=[_bar_row(code, b, fs) for b in keep])
+                added += len(keep)
+                no_factor += sum(1 for b in keep if b["adj_factor"] is None)
         done += 1
         if done % 100 == 0 or done == total:
             _update(kind, progress=done, total=total,
                     message=f"导入 QMT 导出 {done}/{total}")
-    msg = f"补齐 {added} 行"
+    msg = f"补齐 {added} 行（新补复权因子 {filled} 行）"
+    if no_factor:
+        msg += (f"；其中 {no_factor} 行的等比导出解不出复权因子，复权口径留空，"
+                "请在 QMT 重导这几只股票的两份目录后再做一次增量导入即可自动补上")
     if failed:
         msg += f"，失败 {failed} 只"
     _update(kind, message=msg, final=True)

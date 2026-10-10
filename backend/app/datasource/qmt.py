@@ -146,10 +146,15 @@ def read_pair(raw_path: Path, geo_path: Path) -> tuple[list[dict], dict]:
 
     因子取分段常数：只要现有因子还落在当日四价的可行区间内就沿用（于是非除权日的
     复权价环比恰好等于交易所涨跌幅），容不下了才认定发生了除权除息、换成新区间的中点。
-    每行的因子都落在当日区间内，所以 `round(价格 × 因子, 2)` 能逐分复现等比导出。
+    因子非空的行都落在当日区间内，所以 `round(价格 × 因子, 2)` 能逐分复现等比导出。
+
+    等比那份坏掉（价非正、与不复权明显不同源）导致解不出因子时**不丢行**：不复权的
+    OHLC/量/额照记，`adj_factor` 与 `pct_chg` 留 NULL，表示「这根的复权口径无从推算」，
+    等 QMT 重导后再做一次增量导入即可自动补上。
     """
     R, G = _by_date(raw_path), _by_date(geo_path)
-    stats = {"rows": 0, "no_geo": 0, "no_raw": 0, "jumps": 0, "events": 0, "unresolved": 0}
+    stats = {"rows": 0, "no_geo": 0, "no_raw": 0, "jumps": 0, "events": 0,
+             "unresolved": 0, "no_factor": 0}
     bars: list[dict] = []
     factor: float | None = None
     prev_close = prev_factor = None
@@ -173,12 +178,13 @@ def read_pair(raw_path: Path, geo_path: Path) -> tuple[list[dict], dict]:
                     if abs(new_f / factor - 1.0) > 5e-4:
                         stats["events"] += 1
                 factor = new_f
-        if factor is None:
-            continue
         stats["rows"] += 1
+        if factor is None:
+            stats["no_factor"] += 1
         pct = None
-        if prev_close and raw["close"]:
-            if prev_factor and factor and abs(factor / prev_factor - 1.0) > 1e-12:
+        # 前后两根都要有因子才算得出涨跌幅：跨越「解不出因子」的那一段时分不清是除权还是真跌
+        if factor is not None and prev_factor is not None and prev_close and raw["close"]:
+            if abs(factor / prev_factor - 1.0) > 1e-12:
                 # 除权除息日：先按 0.01 元取整出参考价，再算涨跌幅（与交易所算法一致）
                 ref = round(prev_close * prev_factor / factor, 2)
                 if ref > 0:
@@ -231,6 +237,8 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
       等比后复权：末根必须与不复权明显不同（否则两个路径选成了同一份）。
       合并：截止日相同、量额逐行相同（不同即不是同一批次）、因子首日不小于 1、
             单调不减、能逐分复现等比价。
+    解不出因子的行（等比那份坏掉）不参与因子相关的判断，只按行数统计（`no_factor_rows`），
+    不算作导入问题，也不拦导入。
     """
     raw_files = scan_files(raw_root, universe)
     geo_files = scan_files(geo_root, universe)
@@ -283,6 +291,7 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
 
     f_rows = f_no_geo = f_events = 0
     f_unres = f_bars = 0
+    f_no_factor = f_no_factor_stocks = 0
     f_first_bad = f_nonmono = vol_mismatch = date_mismatch = 0
     for code in paired[:40]:
         bars, stats = read_pair(raw_files[code], geo_files[code])
@@ -293,17 +302,24 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
         f_events += stats["events"]
         f_unres += stats["unresolved"]
         f_no_geo += stats["no_geo"]
+        f_no_factor += stats["no_factor"]
+        if stats["no_factor"]:
+            f_no_factor_stocks += 1
         # 首根因子 >1 合法：老股（如 920000 新三板转北交所）的因子基准早于导出窗口，实测 1.09。
         # 远小于 1 才是「前复权」特征——前复权把基准锚在最后一根，早期因子必然 <1。
-        if bars[0]["adj_factor"] < 0.9:
+        # 首根本就解不出因子（等比那份坏掉）时无从判断口径，跳过这只。
+        if bars[0]["adj_factor"] is not None and bars[0]["adj_factor"] < 0.9:
             f_first_bad += 1
         prev = None
         for b in bars:
+            fac = b["adj_factor"]
+            if fac is None:
+                continue
             # 因子只应往上走（分红送转累积）；0.5% 容差是实测舍入带宽的上限（最大回退 0.21%）
-            if prev is not None and b["adj_factor"] < prev * 0.995:
+            if prev is not None and fac < prev * 0.995:
                 f_nonmono += 1
                 break
-            prev = b["adj_factor"]
+            prev = fac
         gmap = _by_date(geo_files[code])
         if gmap and max(gmap) != bars[-1]["date"]:
             date_mismatch += 1
@@ -358,5 +374,9 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
     res["sample_stocks"] = f_rows
     res["factor_events"] = f_events
     res["factor_unreproduced"] = f_unres
+    # 信息项，不进 warning：某只股票的等比那份坏掉时导入仍会照写不复权数据，
+    # 只是这些行的复权口径留空，回 QMT 重导那只股票再增量一次即可自动补上。
+    res["no_factor_rows"] = f_no_factor
+    res["no_factor_stocks"] = f_no_factor_stocks
     res["warning"] = "；".join(warns)
     return res

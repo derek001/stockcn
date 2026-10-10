@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS stocks (
 
 -- 日线：价格存**不复权**（交易所口径，与行情软件一致），复权靠 adj_factor 现算
 -- adj_factor = QMT「等比后复权 ÷ 不复权」推导的累计复权因子（上市首日 = 1）
--- 复权价 = 价格 × adj_factor；pct_chg = 交易所口径涨跌幅（除权日按取整后的参考价计算）
+-- 等比那份坏掉（价非正等）导致当天解不出因子时，adj_factor 留 NULL：不复权价与量额照常如实入库，
+-- 等 QMT 重导后再做一次增量导入即自动补齐（NULL 只表示「复权口径无从推算」，不是缺数据）
+-- 复权价 = 价格 × adj_factor；pct_chg = 交易所口径涨跌幅（除权日按取整后的参考价计算，跨 NULL 段时留 NULL）
 CREATE TABLE IF NOT EXISTS kline_daily (
   code TEXT NOT NULL,
   date TEXT NOT NULL,

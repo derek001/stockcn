@@ -137,7 +137,9 @@ def stock_kline(code: str, start: str = "", end: str = "", adj: str = "raw",
         for k, v in list(r.items()):
             if isinstance(v, float) and pd.isna(v):
                 r[k] = None
-    return {"info": info, "financials": fin, "bars": out}
+    return {"info": info, "financials": fin, "bars": out,
+            # 有几根解不出复权因子（等比那份坏掉）：adj=hfq 时这几根的价格是空的
+            "factor_missing": sum(1 for r in rows if r["adj_factor"] is None)}
 
 
 # ---------------- watch pools ----------------

@@ -176,12 +176,18 @@ def _run(batch_id: str, strategy_id: str, params: dict, start: str, end: str,
         per_year: dict[str, list[float]] = {}
         t_load = t_walk = 0.0
         done = 0
+        no_factor = 0
         for i in range(0, len(codes), CHUNK):
             part = codes[i:i + CHUNK]
             a = time.time()
             bars = _chunk_bars(part, start, end)
             b = time.time()
             for code, df in bars.items():
+                if df["adj_factor"].isna().any():
+                    # 区间里有缺复权因子的根（QMT 等比那份坏掉），复权价算不出来，
+                    # 与其静默丢掉这几根把持股段接错，不如不纳入本次统计
+                    no_factor += 1
+                    continue
                 sig = strategy.generate_signals(df, params)
                 led = backtest.walk_ledger(code, df, sig, capital, fee_rate)
                 if led["bars"] < MIN_BARS:
@@ -209,7 +215,7 @@ def _run(batch_id: str, strategy_id: str, params: dict, start: str, end: str,
             _progress(progress=done, message=f"已完成 {done}/{len(codes)}（{strategy.name}）")
         _persist(batch_id, strategy_id, strategy.name, params, start, end,
                  capital, fee_rate, items, eq_sum, eq_cnt, all_dates, per_year,
-                 skipped, t0, t_load, t_walk)
+                 skipped, no_factor, t0, t_load, t_walk)
     except Exception as e:  # 线程里抛出去没人接，必须落到状态里
         _progress(status="error", message=f"跑批失败：{e}")
         raise
@@ -219,7 +225,8 @@ def _persist(batch_id: str, strategy_id: str, strategy_name: str, params: dict,
              start: str, end: str, capital: float, fee_rate: float,
              items: list[tuple], eq_sum: np.ndarray, eq_cnt: np.ndarray,
              all_dates: list[str], per_year: dict[str, list[float]],
-             skipped: int, t0: float, t_load: float, t_walk: float) -> None:
+             skipped: int, no_factor: int, t0: float, t_load: float,
+             t_walk: float) -> None:
     pnl = np.array([r[8] for r in items]) if items else np.array([])
     exc = np.array([r[10] for r in items]) if items else np.array([])
     dd = np.array([r[11] for r in items if r[11] is not None])
@@ -279,6 +286,7 @@ def _persist(batch_id: str, strategy_id: str, strategy_name: str, params: dict,
         "fees_total": round(float(sum(r[12] for r in items)), 2),
         "missed_total": int(sum(r[7] for r in items)),
         "missed_stocks": int(sum(1 for r in items if r[7] > 0)),
+        "no_factor_stocks": no_factor,
         "years": years,
         "dist": dist,
         "curve": {"dates": all_dates,
@@ -305,6 +313,9 @@ def _persist(batch_id: str, strategy_id: str, strategy_name: str, params: dict,
         stale = prune(conn)
     _progress(status="done", progress=len(items), total=len(items), batch_id=batch_id,
               message=f"跑完 {len(items)} 只，耗时 {time.time()-t0:.0f}s"
+                      + (f"，K线不足未纳入 {skipped} 只" if skipped else "")
+                      + (f"，缺复权因子未纳入 {no_factor} 只（在 QMT 重导这两份再增量导入即可补上）"
+                         if no_factor else "")
                       + (f"，清掉 {len(stale)} 个超期批次（只留最近 {KEEP_BATCHES} 个）" if stale else ""))
 
 
@@ -413,6 +424,8 @@ def curve(batch_id: str, top_n: int = 0) -> dict:
     s = np.zeros(len(dates))
     c = np.zeros(len(dates))
     for code, df in _chunk_bars(codes, head["start"], head["end"]).items():
+        if df["adj_factor"].isna().any():
+            continue    # 与跑批同一口径：缺复权因子的股票不重放，否则净值曲线会接错
         led = backtest.walk_ledger(code, df,
                                    strategy.generate_signals(df, head["params"]),
                                    capital, head["fee_rate"])

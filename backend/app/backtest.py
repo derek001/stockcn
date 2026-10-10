@@ -225,6 +225,14 @@ def run_backtest(code: str, start: str, end: str, capital: float,
     df = load_bars(code, start, end)
     if df.empty or len(df) < 30:
         raise ValueError("该股票在区间内没有足够的本地K线数据，请先执行数据更新")
+    # 缺复权因子（QMT 等比那份坏掉解不出）的这些根算不出复权价，静默丢掉会让持股段凭空断裂，
+    # 所以直接拒绝并说清怎么补
+    missing = df.loc[df["adj_factor"].isna(), "date"].tolist()
+    if missing:
+        raise ValueError(
+            f"{code} 在 {start}~{end} 有 {len(missing)} 根缺复权因子（{missing[0]} 起），"
+            "这些日子算不出复权价，回测结果不可信。请在 QMT 重导这只股票的「不复权」+"
+            "「等比后复权」两份，再到「数据中心 → 本地数据（QMT 导入）」做一次增量导入即可自动补齐")
     led = walk_ledger(code, df, strategy.generate_signals(df, params or {}),
                       capital, fee_rate)
     trades, markers = led["trades"], led["markers"]
