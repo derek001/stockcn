@@ -11,7 +11,9 @@ volume 单位为**手**、amount 单位为**元**，复权口径由导出时的�
 为什么是这两份而不是「不复权 + 后复权」：等比后复权是 `hfq = raw × 因子` 的纯乘法，
 因子分段常数、只在除权除息日跳变，能把两种口径互相还原；而 QMT 的「后复权」是仿射
 `A·raw + B`（B≠0），既反推不出不复权价、环比也会压缩交易所口径的涨跌幅，全市场还有
-57 只早年算出 ≤0 的价格。等比口径实测只有 1 只出现非正价。
+57 只早年算出 ≤0 的价格。等比口径实测全市场只有 1 只出现负价（920427），那是它的累计复权
+因子整只带了负号——四价同号、比值完好，按绝对值逐分可复现，所以入库因子取正值
+（见 `_day_interval`），而不是把它当成导出缺陷。
 """
 from __future__ import annotations
 
@@ -128,17 +130,44 @@ def _by_date(path: Path) -> dict[str, dict]:
 
 
 def _day_interval(raw: dict, geo: dict) -> tuple[float, float] | None:
-    """当日四价共同允许的因子区间；等比价只精确到分，所以是一段闭区间。"""
+    """当日四价共同允许的因子区间；等比价只精确到分，所以是一段闭区间。
+
+    等比那份可以整行带负号：QMT 的累计复权因子被一次「除权乘数算成负数」的事件（派息 ≥
+    前收盘一类）乘翻了符号，一旦变号就一路带到尾，于是这只股票从头到尾全是负价。
+    负号只是作用在四价上的同一个公共符号，比值不受影响，所以这里按绝对值解出正的 |因子|，
+    入库的 `adj_factor` 恒为正，读侧 `价格 × adj_factor` 才拿得到正的复权价。
+    行内正负号混杂说明四价不是同一个因子乘出来的（两份不同源），整行不参与解因子。
+    """
     lo, hi = 0.0, math.inf
+    neg = pos = 0
     for k in _PRICE_KEYS:
         r, g = raw.get(k), geo.get(k)
-        if not r or r <= 0 or g is None or g <= 0:
+        if not r or r <= 0 or not g:
             continue
-        lo = max(lo, (g - _CENT) / r)
-        hi = min(hi, (g + _CENT) / r)
-    if hi == math.inf or lo > hi:
+        a = -g if g < 0 else g
+        if g < 0:
+            neg += 1
+        else:
+            pos += 1
+        lo = max(lo, (a - _CENT) / r)
+        hi = min(hi, (a + _CENT) / r)
+    if hi == math.inf or neg and pos or lo > hi:
         return None
     return lo, hi
+
+
+def _geo_sign(geo: dict) -> tuple[int, int]:
+    """这一行等比价的负价个数、正价个数（0 与缺列都不算）。"""
+    neg = pos = 0
+    for k in _PRICE_KEYS:
+        g = geo.get(k)
+        if not g:
+            continue
+        if g < 0:
+            neg += 1
+        else:
+            pos += 1
+    return neg, pos
 
 
 def read_pair(raw_path: Path, geo_path: Path) -> tuple[list[dict], dict]:
@@ -146,15 +175,16 @@ def read_pair(raw_path: Path, geo_path: Path) -> tuple[list[dict], dict]:
 
     因子取分段常数：只要现有因子还落在当日四价的可行区间内就沿用（于是非除权日的
     复权价环比恰好等于交易所涨跌幅），容不下了才认定发生了除权除息、换成新区间的中点。
-    因子非空的行都落在当日区间内，所以 `round(价格 × 因子, 2)` 能逐分复现等比导出。
+    因子非空的行都落在当日区间内，所以 `round(价格 × 因子, 2)` 能逐分复现等比导出
+    （等比那份整行带负号时复现的是它的绝对值，入库因子恒为正，见 `_day_interval`）。
 
-    等比那份坏掉（价非正、与不复权明显不同源）导致解不出因子时**不丢行**：不复权的
-    OHLC/量/额照记，`adj_factor` 与 `pct_chg` 留 NULL，表示「这根的复权口径无从推算」，
+    等比那份坏掉（行内正负号混杂、与不复权明显不同源）导致解不出因子时**不丢行**：
+    不复权的 OHLC/量/额照记，`adj_factor` 与 `pct_chg` 留 NULL，表示「这根的复权口径无从推算」，
     等 QMT 重导后再做一次增量导入即可自动补上。
     """
     R, G = _by_date(raw_path), _by_date(geo_path)
     stats = {"rows": 0, "no_geo": 0, "no_raw": 0, "jumps": 0, "events": 0,
-             "unresolved": 0, "no_factor": 0}
+             "unresolved": 0, "no_factor": 0, "neg_geo": 0, "mixed_geo": 0}
     bars: list[dict] = []
     factor: float | None = None
     prev_close = prev_factor = None
@@ -166,6 +196,12 @@ def read_pair(raw_path: Path, geo_path: Path) -> tuple[list[dict], dict]:
         if geo is None:
             stats["no_geo"] += 1
         else:
+            neg, pos = _geo_sign(geo)
+            if neg:
+                if pos:
+                    stats["mixed_geo"] += 1
+                else:
+                    stats["neg_geo"] += 1
             iv = _day_interval(raw, geo)
             if iv is None:
                 stats["unresolved"] += 1
@@ -236,9 +272,11 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
       不复权：末根收盘价 ≈ 在线快照现价；末根成交额 ≈ 快照成交额（否则是盘中导出）。
       等比后复权：末根必须与不复权明显不同（否则两个路径选成了同一份）。
       合并：截止日相同、量额逐行相同（不同即不是同一批次）、因子首日不小于 1、
-            单调不减、能逐分复现等比价。
-    解不出因子的行（等比那份坏掉）不参与因子相关的判断，只按行数统计（`no_factor_rows`），
-    不算作导入问题，也不拦导入。
+            能逐分复现等比价。
+    解不出因子的行（等比那份行内正负号混杂）不参与因子相关的判断，只按行数统计
+    （`no_factor_rows`）；整行负价是合法口径，按 |因子| 解（`neg_geo_rows`）。
+    这两类连同 `mixed_geo_rows`、`factor_backtrack_stocks` 都是**信息项，不进 warning**：
+    如实入库原则下它们只影响那几行的复权口径，重导一次再点增量就自愈，不该拦整次导入。
     """
     raw_files = scan_files(raw_root, universe)
     geo_files = scan_files(geo_root, universe)
@@ -292,6 +330,7 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
     f_rows = f_no_geo = f_events = 0
     f_unres = f_bars = 0
     f_no_factor = f_no_factor_stocks = 0
+    f_neg_geo = f_mixed_geo = 0
     f_first_bad = f_nonmono = vol_mismatch = date_mismatch = 0
     for code in paired[:40]:
         bars, stats = read_pair(raw_files[code], geo_files[code])
@@ -303,6 +342,8 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
         f_unres += stats["unresolved"]
         f_no_geo += stats["no_geo"]
         f_no_factor += stats["no_factor"]
+        f_neg_geo += stats["neg_geo"]
+        f_mixed_geo += stats["mixed_geo"]
         if stats["no_factor"]:
             f_no_factor_stocks += 1
         # 首根因子 >1 合法：老股（如 920000 新三板转北交所）的因子基准早于导出窗口，实测 1.09。
@@ -315,7 +356,8 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
             fac = b["adj_factor"]
             if fac is None:
                 continue
-            # 因子只应往上走（分红送转累积）；0.5% 容差是实测舍入带宽的上限（最大回退 0.21%）
+            # 累计因子在「除权参考价高于前收盘」的除权会合法下调（配股、重组复牌），
+            # 0.5% 容差是实测舍入带宽的上限（普通噪声最大 0.21%），只用来数几只股票整段往下走
             if prev is not None and fac < prev * 0.995:
                 f_nonmono += 1
                 break
@@ -357,9 +399,12 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
         warns.append(
             f"{f_first_bad} 只股票的复权系数远小于 1，这是「前复权 / 等比前复权」的特征。"
             "请在 QMT 改选「等比后复权」。")
-    if f_nonmono:
+    # 因子回退本身是合法口径（除权参考价高于前收盘：配股价高于市价、重组/股改后复牌重定价），
+    # 全市场 1696 万行实测 7 只。只有**成规模**回退才说明两份的复权口径不匹配，所以按占比判，
+    # 单只回退只报数不拦导入——否则抽到这 7 只里的任一只，用户就得被迫勾「强制导入」。
+    if f_rows and f_nonmono >= max(8, f_rows // 5):
         warns.append(
-            f"{f_nonmono} 只股票的复权系数出现回退，两份的复权口径不匹配。"
+            f"抽了 {f_rows} 只股票，有 {f_nonmono} 只的复权系数大面积回退，两份的复权口径不匹配。"
             "请把这两份一起重导，并确认选的是「不复权」+「等比后复权」。")
     # QMT 自己的四价偶发无法被单一因子整除到分（实测约占行数 0.05%），只有大面积出现才是口径问题
     if f_bars and f_unres / f_bars > 0.01:
@@ -378,5 +423,10 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
     # 只是这些行的复权口径留空，回 QMT 重导那只股票再增量一次即可自动补上。
     res["no_factor_rows"] = f_no_factor
     res["no_factor_stocks"] = f_no_factor_stocks
+    # 整行负价是合法口径（QMT 的累计复权因子带了负号），按 |因子| 解，这里只报行数供核对；
+    # 行内正负号混杂（mixed_geo_rows）才是真解不出，那些行复权口径留 NULL，导入不拦。
+    res["neg_geo_rows"] = f_neg_geo
+    res["mixed_geo_rows"] = f_mixed_geo
+    res["factor_backtrack_stocks"] = f_nonmono
     res["warning"] = "；".join(warns)
     return res
