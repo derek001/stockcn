@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { api, fmt } from "../api";
 
 interface ParamDef {
@@ -15,6 +15,47 @@ interface History {
   selector_id: string; trade_date: string; params: Record<string, number>;
   count: number; rows: HitRow[]; run_at?: string; dates?: string[];
 }
+interface ReplayTrade {
+  code: string; name: string; base: string; entry_date: string; exit_date: string;
+  days: number; ret_pct: number; bh_pct: number; excess_idx_pct: number | null;
+  exit_reason: string;
+}
+interface ReplayAgg {
+  n: number; win_rate: number | null; ret_med: number | null; ret_mean: number | null;
+  ret_p25: number | null; ret_p75: number | null; excess_own_med: number | null;
+  excess_idx_med: number | null; stop_rate: number | null; timeout_rate: number | null;
+}
+interface ReplayCombo {
+  gates: Record<string, number>; agg: ReplayAgg;
+  snapshots: { base: string; hits: number; trades: number; no_entry: number; broken: number }[];
+  trades: ReplayTrade[];
+}
+interface ReplayResult {
+  job_id: string; elapsed_sec: number; bases: string[];
+  combos: ReplayCombo[];
+}
+interface ReplayStatus {
+  status: string; progress: number; total: number; message: string;
+  job_id?: string;
+  result?: ReplayResult;
+}
+
+// 门槛标签从 params_schema 派生（截到 12 字），schema 加参数不用同步前端映射
+function schemaLabels(meta?: Meta): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const p of meta?.params_schema ?? [])
+    out[p.key] = p.label.split(/[（(]/)[0].trim().slice(0, 12);
+  return out;
+}
+
+function gatesDiff(base: Record<string, number>, cur: Record<string, number>,
+                   labels: Record<string, string>): string {
+  const parts: string[] = [];
+  for (const k of Object.keys(cur)) {
+    if (base[k] !== cur[k]) parts.push(`${labels[k] ?? k}=${cur[k]}`);
+  }
+  return parts.length ? parts.join("，") : "当前门槛";
+}
 
 export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) => void }) {
   const [metas, setMetas] = useState<Meta[] | null>(null);
@@ -25,6 +66,37 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
   const [poolId, setPoolId] = useState(0);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState<Record<string, string>>({});
+  const [rp, setRp] = useState<ReplayStatus | null>(null);
+  const [rpErr, setRpErr] = useState("");
+  const [rpForm, setRpForm] = useState({ snapshots: "6", step_bars: "60", hold_bars: "250", entry: "10", exit: "10", stop: "5" });
+  const [rpSens, setRpSens] = useState(true);
+  const [rpCombo, setRpCombo] = useState(0);
+
+  const loadReplay = () =>
+    api.get<ReplayStatus>("/api/selectors/box/replay").then(setRp).catch(() => { /* 后端没起或没跑过 */ });
+
+  const startReplay = async () => {
+    setRpErr("");
+    const meta = metas?.find((m) => m.id === "box_range");
+    if (!meta) return;
+    const gates: Record<string, number> = {};
+    for (const p of meta.params_schema)
+      gates[p.key] = Number(draft["box_range"]?.[p.key] ?? p.default);
+    const grid = rpSens
+      ? [{ ...gates, ext_max: Math.min(200, gates.ext_max + 50) },
+         { ...gates, decline_min: Math.max(0, gates.decline_min - 20) }]
+      : [];
+    try {
+      await api.post("/api/selectors/box/replay", {
+        gates, grid,
+        snapshots: Number(rpForm.snapshots), step_bars: Number(rpForm.step_bars),
+        hold_bars: Number(rpForm.hold_bars),
+        entry_zone: Number(rpForm.entry) / 100, exit_zone: Number(rpForm.exit) / 100,
+        stop_pct: Number(rpForm.stop) / 100, fee_rate: 0.0003,
+      });
+      loadReplay();
+    } catch (e) { setRpErr((e as Error).message); }
+  };
 
   const load = (id: string, date = "") =>
     api.get<History>(`/api/selectors/results?selector_id=${id}&date=${date}`)
@@ -52,7 +124,14 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
     api.get<{ id: number; name: string }[]>("/api/pools").then((ps) => {
       setPools(ps); if (ps[0]) setPoolId(ps[0].id);
     }).catch(() => { /* 无自选池时下拉框为空 */ });
+    loadReplay();
   }, []);
+
+  useEffect(() => {
+    if (rp?.status !== "running") return;
+    const t = setInterval(loadReplay, 4000);
+    return () => clearInterval(t);
+  }, [rp?.status]);
 
   const setParam = (id: string, key: string, v: string) =>
     setDraft((d) => ({ ...d, [id]: { ...d[id], [key]: v } }));
@@ -111,6 +190,11 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
   };
 
   if (!metas) return <div className="panel">{err.__page || "加载选股器…"}</div>;
+
+  const boxMeta = metas.find((m) => m.id === "box_range");
+  const gateLabels = schemaLabels(boxMeta);
+  // 只认「已完成且 job_id 对得上」的结果：运行中/失败时后端已清空旧结果，这里再挡一层
+  const rpRes = rp?.status === "done" && rp.result?.job_id === rp.job_id ? rp.result : undefined;
 
   return (
     <>
@@ -217,7 +301,7 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                         {hasBox && (<>
                           <th>箱底(元)</th><th>箱顶(元)</th><th>密集带宽%</th><th>段内振幅%</th>
                           <th>现价位置%</th><th>箱体斜率%/年</th><th>穿越次数</th><th>带内占比%</th>
-                          <th>出清回撤%</th><th>箱底日期</th><th>横盘(日)</th><th>近60日挖坑</th>
+                          <th>出清回撤%</th><th>箱底日期</th><th>横盘(日)</th><th>近60日挖坑</th><th>β底</th>
                         </>)}
                       </tr>
                     </thead>
@@ -263,11 +347,12 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                             <td>{r.attrs.box_bottom_date ?? "-"}</td>
                             <td>{fmt.n(r.attrs.box_bars as number, 0)}</td>
                             <td>{r.attrs.box_dip_60d ? "是" : "-"}</td>
+                            <td>{r.attrs.box_beta_bottom ? "β" : "-"}</td>
                           </>)}
                         </tr>
                       ))}
                       {!h.rows.length && (
-                        <tr><td colSpan={16 + (hasBox ? 12 : 0)} className="l muted">这个日期没有入选的股票</td></tr>
+                        <tr><td colSpan={16 + (hasBox ? 13 : 0)} className="l muted">这个日期没有入选的股票</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -277,6 +362,141 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
           </div>
         );
       })}
+      {metas.some((m) => m.id === "box_range") && (
+        <div className="panel">
+          <div className="row">
+            <h3 style={{ margin: 0 }}>箱体回放校准</h3>
+            <span className="badge">box-replay</span>
+            <span style={{ flex: 1 }} />
+            {rp?.status === "running" && (
+              <span className="muted">{rp.progress}/{rp.total} {rp.message}</span>
+            )}
+          </div>
+          <p className="muted" style={{ marginTop: 8 }}>
+            证据回路：在过去若干个快照日上按<strong>当日的箱体口径</strong>重跑选股（不看未来），
+            然后前向回放「收盘进密集带下沿 {rpForm.entry}% 内买入、到上沿 {rpForm.exit}% 内卖出、
+            跌破箱底 {rpForm.stop}% 止损、持满 {rpForm.hold_bars} 个交易日超时」，
+            用收益分布对照「同一只拿着不动」与「所属大盘指数」，检验门槛松紧到底值不值。
+            每个快照要算一遍全市场箱体（实测 1~5 分钟），默认 6 个快照约 10~25 分钟，
+            期间其它页面会排队。门槛取上面「长箱体震荡」当前的参数草稿。
+          </p>
+          <div className="row" style={{ flexWrap: "wrap", rowGap: 8 }}>
+            {([["snapshots", "快照数"], ["step_bars", "快照间隔(交易日)"], ["hold_bars", "持有窗口(交易日)"],
+               ["entry", "入场带内%(下沿)"], ["exit", "离场带内%(上沿)"], ["stop", "止损%(破箱底)"]] as const).map(([k, label]) => (
+              <label className="field" key={k}>
+                {label}
+                <input type="number" style={{ width: 92 }} value={rpForm[k]}
+                  onChange={(e) => setRpForm((f) => ({ ...f, [k]: e.target.value }))} />
+              </label>
+            ))}
+            <label className="field">
+              <input type="checkbox" checked={rpSens} onChange={(e) => setRpSens(e.target.checked)} />
+              敏感性对比（振幅+50 / 回撤-20）
+            </label>
+            <button className="btn primary" disabled={rp?.status === "running"} onClick={startReplay}>
+              {rp?.status === "running" ? "回放中…" : "启动回放校准"}
+            </button>
+          </div>
+          {rpErr && <div className="up" style={{ marginTop: 8 }}>{rpErr}</div>}
+          {rp?.status === "error" && <div className="up" style={{ marginTop: 8 }}>{rp.message}</div>}
+
+          {rpRes?.combos?.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="row" style={{ marginBottom: 8 }}>
+                <span className="muted">
+                  {rpRes.bases.length} 个快照 × {rpRes.combos.length} 组门槛，耗时 {fmt.n(rpRes.elapsed_sec, 0)} 秒
+                  （快照日 {rpRes.bases.join("、")}）
+                </span>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="l">门槛</th><th>成交笔数</th><th>胜率%</th><th>收益中位%</th>
+                      <th>P25%</th><th>P75%</th><th>对自身持有超额中位%</th><th>对大盘超额中位%</th>
+                      <th>止损率%</th><th>超时率%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rpRes.combos.map((c, i) => (
+                      <tr key={i} style={{ cursor: "pointer", fontWeight: i === rpCombo ? 600 : 400 }}
+                        onClick={() => setRpCombo(i)}>
+                        <td className="l">{gatesDiff(rpRes.combos[0].gates, c.gates, gateLabels)}</td>
+                        <td>{c.agg.n}</td><td>{fmt.n(c.agg.win_rate, 1)}</td>
+                        <td>{fmt.n(c.agg.ret_med)}</td><td>{fmt.n(c.agg.ret_p25)}</td><td>{fmt.n(c.agg.ret_p75)}</td>
+                        <td>{fmt.n(c.agg.excess_own_med)}</td><td>{fmt.n(c.agg.excess_idx_med)}</td>
+                        <td>{fmt.n(c.agg.stop_rate, 1)}</td><td>{fmt.n(c.agg.timeout_rate, 1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {(() => {
+                const c = rpRes.combos[rpCombo] ?? rpRes.combos[0];
+                if (!c) return null;
+                return (
+                  <div style={{ marginTop: 12 }}>
+                    <div className="row" style={{ marginBottom: 8 }}>
+                      <span className="muted">
+                        「{gatesDiff(rpRes.combos[0].gates, c.gates, gateLabels)}」逐快照与成交明细（点击上表切换门槛组合）
+                      </span>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>快照日</th><th>命中</th><th>成交</th><th>未入场</th><th>买前破位</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {c.snapshots.map((s) => (
+                            <tr key={s.base}>
+                              <td>{s.base}</td><td>{s.hits}</td><td>{s.trades}</td>
+                              <td>{s.no_entry}</td><td>{s.broken}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="table-wrap" style={{ marginTop: 8 }}>
+                      <table>
+                        <thead>
+                          <tr>
+                            <th className="l">代码</th><th className="l">名称</th><th>快照日</th>
+                            <th>入场日</th><th>出场日</th><th>持有(日)</th><th>收益%</th>
+                            <th>同期持有%</th><th>对大盘超额%</th><th className="l">出场原因</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {c.trades.map((t) => (
+                            <tr key={`${t.code}-${t.base}-${t.entry_date}`}
+                              onClick={() => onOpenStock(t.code)} style={{ cursor: "pointer" }}>
+                              <td className="l">{t.code}</td>
+                              <td className="l">{t.name}</td>
+                              <td>{t.base}</td><td>{t.entry_date}</td><td>{t.exit_date}</td>
+                              <td>{t.days}</td>
+                              <td dangerouslySetInnerHTML={{ __html: fmt.pct(t.ret_pct) }} />
+                              <td dangerouslySetInnerHTML={{ __html: fmt.pct(t.bh_pct) }} />
+                              <td dangerouslySetInnerHTML={{ __html: fmt.pct(t.excess_idx_pct ?? null) }} />
+                              <td className="l">{t.exit_reason}</td>
+                            </tr>
+                          ))}
+                          {!c.trades.length && (
+                            <tr><td colSpan={10} className="l muted">这组门槛在回放窗口里没有成交</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          ) : rp?.status === "done" && (
+            <p className="muted" style={{ marginTop: 8 }}>跑完了但还没有结果，再启动一次试试</p>
+          )}
+        </div>
+      )}
     </>
   );
 }

@@ -3,8 +3,9 @@
 口径（2026-10-05 与用户重定，四条规则）：
 1. **价格一律用收盘价**（含「挖坑」，不再看盘中最低价 `low`），计算用等比后复权收盘 `close * adj_factor`。
    比值/百分比类字段与复权口径无关；箱顶/箱底为与页面上的「最新价」对齐，整段 ÷ 该股最新复权因子。
-2. **先找底**：在最近 6 年（1500 个交易日）里取最低复权收盘，其日期 `box_bottom_date` 就是「出清完成」那一点
-   （并列取最早一根，实测取最早/最晚对段长与高度分布几乎无差：段≥600 根的只数 2697 vs 2691）。
+2. **先找底（带容差）**：在最近 6 年（1500 个交易日）里取最低复权收盘 mn，`box_bottom_date`＝收盘 ≤ mn×(1+`bottom_tol`)
+   （默认 2%）的**最早**一天，即「出清完成」那一点。容差是为了消刀锋效应：日后出现只低 0.5% 的新低时，
+   锚点不会突然跳到近期把 `box_bars` 砍短、整只票掉出池子；段内最低收盘仍恒等于 mn（mn 本身必在段内）。
    **箱体段 = 该日之后（含当日）的日线**，段根数 `box_bars`，段长必须 ≥3 年才谈得上「3 年以上箱体」。
 3. **箱体上下沿 = 段内覆盖 dense_pct% 交易日收盘的比值最窄区间**（密集带），不是段内极值。
    「最窄」按 ln 距离（= 顶/底比值）量，与高度定义 顶/底−1 同一个目标函数；按绝对价差量会选出明显偏低的
@@ -17,6 +18,10 @@
    `box_decline_pre` = 1 − 箱底 ÷ 该段最高复权收盘，即「一波下跌」的深度。
 
 其余：
+- **β底标记 `box_beta_bottom`**：箱底日落在该股所属宽基指数（沪→上证、创业板→创业板指、其余深市→深成指、
+  北交所→北证50）**同一个找底窗口「底部区域」（收盘 ≤ 窗口最低×1.05 的日子）的 ±`BETA_DAYS`（20）个
+  指数交易日**内 → 1。个股 60% 回撤可能只是大盘崩盘的 β 而不是个股出清（README 里伊利的例子），
+  选股器默认剔除这类票。指数数据缺了就不判（不惩罚）。
 - 年化斜率 = 对 ln(复权收盘) 关于**全市场交易日序号**做最小二乘，再 (exp(slope*250)-1) 年化。用全市场日历序号
   而不是「该股自身第几根 bar」，停牌缺口才会体现在时间轴上（实测无停牌个股两者完全相同，中位差 0.0000%）。
 - 挖坑 = 近 60 个交易日有**收盘**跌破密集带下沿，且现价又收回带内。
@@ -25,6 +30,10 @@
   29 个 920xxx 新三板平移代码 + 000001/000002/000505/600018；6 只首根更晚，最多差 33 天），这些按上市日算。
   「横盘够不够久」的硬门槛是 `box_bars`（箱体段根数），与本字段无关。
 - `box_time_pct`（带内占比）按定义恒 ≥ dense_pct，只能展示/排序，不能当硬过滤。
+- `box_lo_adj` / `box_hi_adj` 是密集带上下沿的**原始后复权值**（未除复权因子，页面不展示），回放校准（boxreplay.py）
+  拿它和 `close × adj_factor` 的连续序列直接比，不用换坐标。
+- `base` 参数把「基准日」从默认的库里最新一根改成任意历史日（回放校准用）：所有窗口（找底/出清/近端）
+  都按 `date <= base` 截断，不看未来。
 
 实现刻意不走 `screening.load_universe()` 的 pandas 路径：2250 交易日约 570 万行，全市场载入 Python 会拖到几分钟，
 所以统计尽量在 SQLite 侧聚合，只回传每只一行。逐遍：① 找底窗口内最低复权收盘 → ② 该最低值出现的日期（并列取最早）
@@ -33,8 +42,10 @@
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import math
+import threading
 from collections import defaultdict
 
 from . import db
@@ -47,32 +58,40 @@ TRADING_DAYS = 250
 DEFAULT_FIND_DAYS = 1500    # 找底窗口：6 年
 DEFAULT_PRE_DAYS = 750      # 出清段：箱底之前 3 年
 DEFAULT_DENSE_PCT = 80.0
+DEFAULT_BOTTOM_TOL = 0.02   # 找底容差：收盘 ≤ 窗口最低 ×(1+tol) 的最早一天都当「底」（0 = 旧口径的精确最低）
+BETA_DAYS = 20              # 箱底日离指数「底部区域」≤ 这么多个指数交易日 → 判 β底
+BETA_ZONE_PCT = 1.05        # 指数底部区域＝收盘 ≤ 窗口最低 ×1.05 的日子（2024 年 2 月/9 月两个大盘底都算）
 RECENT_DAYS = 60            # 「挖坑」的近端窗口
 
-# (基准日, 找底天数, 密集占比) -> {code: 指标}
+# (基准日, 找底天数, 密集占比, 找底容差) -> {code: 指标}
 _cache: dict[tuple, dict[str, dict]] = {}
 _CACHE_MAX = 4
+
+# TEMP 表管线的单飞锁：db._lock 只串行化单条语句，回放/预热/页面三条路径并发进 compute() 时，
+# 固定名 TEMP 表会互相 DELETE/DROP，轻则 no such table、重则两个 base 的数据串味静默写进缓存。
+_compute_lock = threading.Lock()
 
 _BAND_TABLE = "box_band_tmp"
 _DATE_TABLE = "box_date_tmp"
 _MIN_TABLE = "box_min_tmp"
 _BTM_TABLE = "box_bottom_tmp"
 
-# ① 找底窗口内的最低复权收盘
+# ① 找底窗口内的最低复权收盘（date <= base：历史基准日的回放不看未来）
 _MIN_SQL = (
     "SELECT code, MIN(close * adj_factor) FROM kline_daily "
-    "WHERE date >= ? AND close > 0 AND adj_factor > 0 GROUP BY code")
+    "WHERE date >= ? AND date <= ? AND close > 0 AND adj_factor > 0 GROUP BY code")
 
-# ② 该最低值出现的日期；并列取最早一根（MIN(date)）。浮点等值成立：SQLite 存的乘积与这里重算是同一串位。
+# ② 找底（带容差）：段内最早一根收盘 ≤ mn×(1+tol) 的日线。原来靠浮点等值 join 拿「恰好等于 mn」的那根，
+#   换成 <= 比较后不再依赖存储位级一致；tol=0 时与旧口径等价（只有 mn 本身满足 <= mn）。
 _BTM_SQL = (
     "SELECT k.code, MIN(k.date) FROM kline_daily k JOIN %s m ON m.code = k.code "
-    "AND k.close * k.adj_factor = m.mn WHERE k.date >= ? AND k.close > 0 AND k.adj_factor > 0 "
-    "GROUP BY k.code" % _MIN_TABLE)
+    "AND k.close * k.adj_factor <= m.mn * ? WHERE k.date >= ? AND k.date <= ? "
+    "AND k.close > 0 AND k.adj_factor > 0 GROUP BY k.code" % _MIN_TABLE)
 
 # ③ 段内收盘的 ln 分箱直方图（0.25% 格宽），滑窗求最窄密集带
 _HIST_SQL = (
     "SELECT k.code, CAST(FLOOR(LN(k.close * k.adj_factor) * ?) AS INT), COUNT(*) "
-    "FROM kline_daily k JOIN %s b ON b.code = k.code WHERE k.date >= b.bd "
+    "FROM kline_daily k JOIN %s b ON b.code = k.code WHERE k.date >= b.bd AND k.date <= ? "
     "AND k.close > 0 AND k.adj_factor > 0 GROUP BY 1, 2 ORDER BY 1, 2" % _BTM_TABLE)
 
 # ④ 出清段：底之前那 750 个交易日的最高复权收盘（pd = 逐股倒推出来的窗口起点，存在 _BTM_TABLE）
@@ -102,14 +121,14 @@ FROM (
          CASE WHEN k.c BETWEEN b.lo AND b.hi THEN 1 ELSE 0 END AS in_band,
          CASE WHEN k.date >= ? THEN k.c END AS recent_min,
          CASE WHEN k.date = ? THEN k.c END AS last_close
-  FROM (
-    SELECT kd.code AS code, kd.date AS date,
-           kd.close * kd.adj_factor AS c,
-           LN(kd.close * kd.adj_factor) AS ln,
-           d.x AS x
-    FROM kline_daily kd JOIN {_DATE_TABLE} d ON d.date = kd.date
-    WHERE kd.date >= ? AND kd.close > 0 AND kd.adj_factor > 0
-  ) k
+   FROM (
+     SELECT kd.code AS code, kd.date AS date,
+            kd.close * kd.adj_factor AS c,
+            LN(kd.close * kd.adj_factor) AS ln,
+            d.x AS x
+     FROM kline_daily kd JOIN {_DATE_TABLE} d ON d.date = kd.date
+     WHERE kd.date >= ? AND kd.date <= ? AND kd.close > 0 AND kd.adj_factor > 0
+   ) k
   JOIN {_BAND_TABLE} b ON b.code = k.code AND k.date >= b.bd
 ) GROUP BY code
 """
@@ -126,11 +145,11 @@ def latest_bar_date() -> str:
     return (row or {}).get("d") or ""
 
 
-def _nth_last_date(back_days: int) -> str:
-    """库里倒数第 back_days 个有行情的日历日（找底窗口起点、出清段起点、近 60 日分界都用它）。"""
+def _nth_last_date(back_days: int, base: str) -> str:
+    """base（含）之前倒数第 back_days 个有行情的日历日（找底窗口起点、出清段起点、近 60 日分界都用它）。"""
     row = db.query_one(
-        "SELECT date FROM (SELECT DISTINCT date FROM kline_daily "
-        "ORDER BY date DESC LIMIT 1 OFFSET ?)", (back_days - 1,))
+        "SELECT date FROM (SELECT DISTINCT date FROM kline_daily WHERE date <= ? "
+        "ORDER BY date DESC LIMIT 1 OFFSET ?)", (base, back_days - 1))
     return (row or {}).get("date") or ""
 
 
@@ -193,19 +212,72 @@ def _years_between(d1: str, d2: str) -> float | None:
     return (b - a).days / 365.25
 
 
+def _beta_flags(bottom_date: dict[str, str], find_start: str, base: str) -> dict[str, int]:
+    """箱底日撞上所属宽基指数自身在同一找底窗口的「底部区域」→ {code: 1}。
+
+    底部区域＝指数收盘 ≤ 窗口最低收盘 × `BETA_ZONE_PCT`(1.05) 的所有交易日，再向两侧各扩
+    `BETA_DAYS`(20) 个指数交易日。按「区域」而不是「最低那一天」：2024 年上证 2 月与 9 月是两个
+    相距半年的大盘底，只认全局最低日会把 9 月那批 β底全漏掉（伊利就是例子）。
+    个股深回撤可能只是大盘崩盘的 β，不是「一波下跌出清」；指数行不足或缺该指数时不判（不惩罚）。
+    指数与个股日历不同步（停牌）时，把箱底日贴到它前一个指数交易日再比序号。
+    """
+    from .datasource.eastmoney import INDEXES, index_secid_for
+
+    secid2key = {v[0]: k for k, v in INDEXES.items()}
+    # key -> (指数交易日列表, 每天到最近区域日的距离)；两份列表必须同源同长（都来自带 close 过滤的同一次查询），
+    # 否则 NULL close 的行会让 bisect 索引与 dist 错位、错标 β 甚至 IndexError
+    zone: dict[str, tuple[list[str], list[int]]] = {}
+    for key in INDEXES:
+        rows = db.query(
+            "SELECT date, close FROM index_kline WHERE index_code=? AND date>=? AND date<=? "
+            "AND close IS NOT NULL ORDER BY date", (key, find_start, base))
+        if len(rows) < 2:
+            continue
+        mn = min(r["close"] for r in rows)
+        threshold = mn * BETA_ZONE_PCT
+        in_zone = [r["close"] <= threshold for r in rows]
+        dist = [0 if z else len(rows) for z in in_zone]
+        for i in range(1, len(rows)):
+            dist[i] = min(dist[i], dist[i - 1] + 1)
+        for i in range(len(rows) - 2, -1, -1):
+            dist[i] = min(dist[i], dist[i + 1] + 1)
+        zone[key] = ([r["date"] for r in rows], dist)
+
+    out: dict[str, int] = {}
+    for code, bd in bottom_date.items():
+        key = secid2key.get(index_secid_for(code))
+        got = zone.get(key) if key else None
+        if not got:
+            continue
+        ds, dist = got
+        i = bisect.bisect_left(ds, bd)
+        if i >= len(ds) or ds[i] != bd:
+            i = min(max(i - 1, 0), len(ds) - 1)
+        if dist[i] <= BETA_DAYS:
+            out[code] = 1
+    return out
+
+
 def compute(find_days: int = DEFAULT_FIND_DAYS,
-            dense_pct: float = DEFAULT_DENSE_PCT) -> dict[str, dict]:
-    """全市场箱体指标，返回 {code: {...}}；按 (基准日, 找底天数, 密集占比) 缓存。"""
-    base = latest_bar_date()
+            dense_pct: float = DEFAULT_DENSE_PCT,
+            bottom_tol: float = DEFAULT_BOTTOM_TOL,
+            base: str = "",
+            use_cache: bool = True) -> dict[str, dict]:
+    """全市场箱体指标，返回 {code: {...}}；按 (基准日, 找底天数, 密集占比, 找底容差) 缓存。
+
+    base 给空串＝用库里最新一根；回放校准传历史日期，所有窗口都按 date <= base 截断。
+    use_cache=False 供回放批量跑历史快照用，不挤占线上那 4 个缓存位。
+    """
+    base = base or latest_bar_date()
     if not base:
         return {}
-    key = (base, find_days, dense_pct)
-    if key in _cache:
+    key = (base, find_days, dense_pct, bottom_tol)
+    if use_cache and key in _cache:
         return _cache[key]
 
-    find_start = _nth_last_date(find_days)
-    load_start = _nth_last_date(find_days + DEFAULT_PRE_DAYS)
-    recent_from = _nth_last_date(RECENT_DAYS)
+    find_start = _nth_last_date(find_days, base)
+    load_start = _nth_last_date(find_days + DEFAULT_PRE_DAYS, base)
+    recent_from = _nth_last_date(RECENT_DAYS, base)
     if not find_start:
         return {}
     if not load_start:  # 库里不足 9 年（首次导入、只回补了几年）：从最早一天起算出清段
@@ -213,60 +285,62 @@ def compute(find_days: int = DEFAULT_FIND_DAYS,
 
     # 全市场交易日历：x 给斜率用（停牌缺口要落在时间轴上），倒推 750 格给每只票定出清段起点
     dates = [r["date"] for r in
-             db.query("SELECT DISTINCT date FROM kline_daily WHERE date >= ? ORDER BY date",
-                      (load_start,))]
+             db.query("SELECT DISTINCT date FROM kline_daily WHERE date >= ? AND date <= ? "
+                      "ORDER BY date", (load_start, base))]
     if not dates:
         return {}
     x_of = {d: i + 1 for i, d in enumerate(dates)}
 
     conn = db.get_conn()  # 临时表建在这条共享连接上，同一连接才看得见
-    for tbl, cols in ((_MIN_TABLE, "code TEXT PRIMARY KEY, mn REAL"),
-                      (_BTM_TABLE, "code TEXT PRIMARY KEY, bd TEXT, pd TEXT"),
-                      (_BAND_TABLE, "code TEXT PRIMARY KEY, lo REAL, hi REAL, bd TEXT"),
-                      (_DATE_TABLE, "date TEXT PRIMARY KEY, x REAL")):
-        db.execute(f"CREATE TEMP TABLE IF NOT EXISTS {tbl} ({cols})")
-        db.execute(f"DELETE FROM {tbl}")
-    try:
-        db.execute(f"INSERT INTO {_DATE_TABLE}(date, x) VALUES (?,?)",
-                   many=[(d, i + 1) for i, d in enumerate(dates)])
-        db.execute(f"INSERT INTO {_MIN_TABLE}(code, mn) VALUES (?,?)",
-                   many=[(r[0], r[1]) for r in db.query_rows(_MIN_SQL, (find_start,))])
-        # 出清段起点 pd = 箱底在日历上往前数 DEFAULT_PRE_DAYS 格；不足则从日历最早一天起（回撤照算，
-        # 只是窗口短于 3 年 —— 新股会走到这里，段根数门槛本来就会把它们挡掉）
-        bottoms = []
-        for code, bd in db.query_rows(_BTM_SQL, (find_start,)):
-            idx = x_of.get(bd)
-            if idx is None:
-                continue
-            bottoms.append((code, bd, dates[max(0, idx - 1 - DEFAULT_PRE_DAYS)]))
-        if not bottoms:
-            return {}
-        db.execute(f"INSERT INTO {_BTM_TABLE}(code, bd, pd) VALUES (?,?,?)", many=bottoms)
+    with _compute_lock:   # 管线级互斥：回放/预热/页面请求并发时在这里排队，不许交错用彼此的 TEMP 表
+        for tbl, cols in ((_MIN_TABLE, "code TEXT PRIMARY KEY, mn REAL"),
+                          (_BTM_TABLE, "code TEXT PRIMARY KEY, bd TEXT, pd TEXT"),
+                          (_BAND_TABLE, "code TEXT PRIMARY KEY, lo REAL, hi REAL, bd TEXT"),
+                          (_DATE_TABLE, "date TEXT PRIMARY KEY, x REAL")):
+            db.execute(f"CREATE TEMP TABLE IF NOT EXISTS {tbl} ({cols})")
+            db.execute(f"DELETE FROM {tbl}")
+        try:
+            db.execute(f"INSERT INTO {_DATE_TABLE}(date, x) VALUES (?,?)",
+                       many=[(d, i + 1) for i, d in enumerate(dates)])
+            db.execute(f"INSERT INTO {_MIN_TABLE}(code, mn) VALUES (?,?)",
+                       many=[(r[0], r[1]) for r in db.query_rows(_MIN_SQL, (find_start, base))])
+            # 出清段起点 pd = 箱底在日历上往前数 DEFAULT_PRE_DAYS 格；不足则从日历最早一天起（回撤照算，
+            # 只是窗口短于 3 年 —— 新股会走到这里，段根数门槛本来就会把它们挡掉）
+            bottoms = []
+            for code, bd in db.query_rows(_BTM_SQL, (1.0 + bottom_tol, find_start, base)):
+                idx = x_of.get(bd)
+                if idx is None:
+                    continue
+                bottoms.append((code, bd, dates[max(0, idx - 1 - DEFAULT_PRE_DAYS)]))
+            if not bottoms:
+                return {}
+            db.execute(f"INSERT INTO {_BTM_TABLE}(code, bd, pd) VALUES (?,?,?)", many=bottoms)
 
-        per_hist: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        n_of: dict[str, int] = defaultdict(int)
-        for code, bin_, k in db.query_rows(_HIST_SQL, (BIN_SCALE,)):
-            per_hist[code].append((bin_, k))
-            n_of[code] += k
-        bands = {}
-        for code, counts in per_hist.items():
-            band = _dense_band(counts, n_of[code], dense_pct)
-            if band:
-                bands[code] = band
-        if not bands:
-            return {}
-        bd_of = {c: bd for c, bd, _ in bottoms}
-        db.execute(f"INSERT INTO {_BAND_TABLE}(code, lo, hi, bd) VALUES (?,?,?,?)",
-                   many=[(c, lo, hi, bd_of.get(c, "")) for c, (lo, hi) in bands.items()])
+            per_hist: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            n_of: dict[str, int] = defaultdict(int)
+            for code, bin_, k in db.query_rows(_HIST_SQL, (BIN_SCALE, base)):
+                per_hist[code].append((bin_, k))
+                n_of[code] += k
+            bands = {}
+            for code, counts in per_hist.items():
+                band = _dense_band(counts, n_of[code], dense_pct)
+                if band:
+                    bands[code] = band
+            if not bands:
+                return {}
+            bd_of = {c: bd for c, bd, _ in bottoms}
+            db.execute(f"INSERT INTO {_BAND_TABLE}(code, lo, hi, bd) VALUES (?,?,?,?)",
+                       many=[(c, lo, hi, bd_of.get(c, "")) for c, (lo, hi) in bands.items()])
 
-        premax = {r[0]: r[1] for r in db.query_rows(_PREMAX_SQL)}
-        agg = db.query(_FACTOR_SQL, (recent_from, base, find_start))
-    finally:
-        for tbl in (_MIN_TABLE, _BTM_TABLE, _BAND_TABLE, _DATE_TABLE):
-            db.execute(f"DROP TABLE IF EXISTS {tbl}")
-        conn.commit()
+            premax = {r[0]: r[1] for r in db.query_rows(_PREMAX_SQL)}
+            agg = db.query(_FACTOR_SQL, (recent_from, base, find_start, base))
+        finally:
+            for tbl in (_MIN_TABLE, _BTM_TABLE, _BAND_TABLE, _DATE_TABLE):
+                db.execute(f"DROP TABLE IF EXISTS {tbl}")
+            conn.commit()
 
     bottom_date = {c: bd for c, bd, _ in bottoms}
+    beta = _beta_flags(bottom_date, find_start, base)
     starts = _start_dates()
     out: dict[str, dict] = {}
     for r in agg:
@@ -295,6 +369,9 @@ def compute(find_days: int = DEFAULT_FIND_DAYS,
             # 展示坐标：整段除以最新复权因子换回「今日价口径」（元），比值类字段不受影响
             "box_top": round(hi / factor, 2) if factor else None,
             "box_bottom": round(lo / factor, 2) if factor else None,
+            # 带沿的原始后复权值（回放校准用，与 close×adj_factor 同一条连续序列）
+            "box_lo_adj": lo,
+            "box_hi_adj": hi,
             "box_height": round(height, 1) if height is not None else None,
             "box_ext_height": round(ext_height, 1) if ext_height is not None else None,
             "box_pos": round(pos, 1) if pos is not None else None,
@@ -307,10 +384,13 @@ def compute(find_days: int = DEFAULT_FIND_DAYS,
             "box_bars": seg_bars,
             "box_bottom_date": bottom_date.get(code),
             "box_decline_pre": round(decline, 1) if decline is not None else None,
+            "box_beta_bottom": beta.get(code, 0),
             "box_years": (lambda v: round(v, 1) if v is not None else None)(
                 _years_between(starts.get(code, ""), base)),
         }
 
+    if not use_cache:
+        return out
     if len(_cache) >= _CACHE_MAX:
         _cache.pop(next(iter(_cache)))
     _cache[key] = out

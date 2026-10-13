@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from . import backtest as bt
 from . import backtest_batch as bt_batch
-from . import db, screening
+from . import boxreplay, db, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
@@ -322,6 +322,37 @@ def selectors_results(selector_id: str = Query(...), date: str = ""):
     got = sel_runner.load(selector_id, date)
     got["dates"] = sel_runner.dates(selector_id)
     return got
+
+
+# ---------------- box replay（箱体选股的回放校准） ----------------
+
+class BoxReplayReq(BaseModel):
+    gates: dict = {}            # 箱体门槛（box_range 选股器的参数，缺省补默认值）
+    grid: list[dict] = []       # 敏感性：要对比的额外门槛组合
+    snapshots: int = 6          # 历史快照数（每 step_bars 个交易日一个）
+    step_bars: int = 60
+    hold_bars: int = 250        # 每个快照前向交易的窗口
+    entry_zone: float = 0.10    # 收盘进入密集带下沿 10% 以内买入
+    exit_zone: float = 0.10     # 收盘到带上沿 10% 以内卖出
+    stop_pct: float = 0.05      # 收盘跌破箱底 5% 止损
+    fee_rate: float = 0.0003
+
+
+@app.post("/api/selectors/box/replay")
+def box_replay_run(body: BoxReplayReq):
+    msg, st = boxreplay.start(body.gates, body.grid, body.snapshots, body.step_bars,
+                              body.hold_bars, body.entry_zone, body.exit_zone,
+                              body.stop_pct, body.fee_rate)
+    if msg == "started":
+        return {"ok": True, **st}
+    raise HTTPException(400, msg)
+
+
+@app.get("/api/selectors/box/replay")
+def box_replay_status():
+    st = boxreplay.status()
+    # 运行中的轮询不带结果：旧结果是上一轮门槛的，序列化几百 KB 白送还容易误读
+    return {**st, "result": boxreplay.result() if st["status"] != "running" else {}}
 
 
 # ---------------- backtest ----------------

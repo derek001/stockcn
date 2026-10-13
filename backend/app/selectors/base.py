@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 
 # 这些是最后一根K线的指标值，存在 ctx["tech"] 里；其余字段在 ctx 顶层
@@ -52,6 +53,8 @@ def resolve_params(schema: list[dict], overrides: dict | None) -> dict:
             val = float(raw)
         except (TypeError, ValueError):
             raise ValueError(f"参数「{label}」要填数字，当前是 {raw!r}")
+        if not math.isfinite(val):  # nan 与任何比较都是 False，能穿透下面的 min/max 检查
+            raise ValueError(f"参数「{label}」不能是 NaN 或无穷")
         lo, hi = p.get("min"), p.get("max")
         if (lo is not None and val < lo) or (hi is not None and val > hi):
             raise ValueError(f"参数「{label}」只能在 {lo} ~ {hi} 之间，当前是 {val:g}")
@@ -78,10 +81,15 @@ def signal(ctx: dict, key: str) -> bool:
     return bool(((ctx.get("tech") or {}).get("signals") or {}).get(key))
 
 
+def name_excluded(name: str | None) -> bool:
+    """名称口径的剔除规则（ST/*ST/退市风险）。选股器 tradable() 与回放校准共用，别各自内联复制。"""
+    n = (name or "").upper()
+    return "ST" in n or "退" in n
+
+
 def tradable(ctx: dict) -> bool:
     """剔除 ST/*ST/退市风险股，以及当日没有新K线的（停牌或本地缺文件）。"""
-    name = (ctx.get("name") or "").upper()
-    if "ST" in name or "退" in name:
+    if name_excluded(ctx.get("name")):
         return False
     snap, bar = ctx.get("trade_date"), ctx.get("kline_date")
     if not bar:

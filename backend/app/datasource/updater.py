@@ -515,6 +515,22 @@ def _snapshots() -> dict[str, dict]:
         "SELECT code, price, amount, trade_date FROM fundamentals") if r["price"]}
 
 
+def _warm_box_cache() -> None:
+    """QMT 导入完成后后台预热箱体缓存：之后第一个打开筛选/选股页的人不用再等全市场计算。
+
+    放在守护线程里跑，导入任务本身先收尾；这 ~1 分钟里那条共用连接会被占住（与页面上
+    触发箱体计算时的排队行为相同），换来的是冷启动 2~3 分钟的等待直接消失。
+    """
+    def _run():
+        try:
+            from .. import boxrange
+            boxrange.invalidate()
+            boxrange.compute()
+        except Exception:
+            traceback.print_exc()
+    threading.Thread(target=_run, daemon=True, name="boxrange-warm").start()
+
+
 def _job_local(kind: str, raw_root: str, geo_root: str, force: bool = False) -> None:
     """导入前强制双目录体检：路径选错、两份不是同一批次，都会污染整个日线库。"""
     universe = _universe()
@@ -549,6 +565,7 @@ def _job_local(kind: str, raw_root: str, geo_root: str, force: bool = False) -> 
     st["qmt_path_raw"] = os.path.abspath(raw_root)
     st["qmt_path_geo"] = os.path.abspath(geo_root)
     _save_status(st)
+    _warm_box_cache()
 
 
 def _backfill_pct_chg() -> None:
