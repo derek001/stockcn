@@ -142,6 +142,20 @@ export default function DataCenter() {
       </div>
 
       <div className="panel">
+        <h3>在线数据（公开接口）</h3>
+        <p className="muted" style={{ marginTop: 0 }}>
+          包含：股票列表（含每只的上市日期，个股页可看）、最新价/涨跌幅/市值/PE/PB/行业的当日快照、最近几个季度的财报、行业板块、大盘指数，
+          <strong>不含个股日线</strong>（日线在下面的「本地数据」里）。平时点「日常刷新」就够了。
+        </p>
+        <Job label="全量刷新（首次建库）" j={st.full} busy={busy} onStart={() => start("full")} />
+        <p className="muted">首次建库用，会把近 12 期财报全部拉一遍，耗时较长。上次完成: {st.last_full ?? "从未"}</p>
+        <Job label="日常刷新" j={st.incremental} busy={busy} onStart={() => start("incremental")} />
+        <p className="muted">
+          每天收盘后先点这个（它只更新列表与快照、近 2 期财报、指数，不动日线库）。上次完成: {st.last_incremental ?? "从未"}
+        </p>
+      </div>
+
+      <div className="panel">
         <h3>本地数据（QMT 导入）</h3>
         <p className="muted" style={{ marginTop: 0 }}>
           包含：个股日线（开高低收、成交量/成交额、涨跌幅），覆盖 A 股全部上市公司，只从下面这两个 QMT 目录进库。
@@ -231,19 +245,6 @@ export default function DataCenter() {
         </p>
       </div>
 
-      <div className="panel">
-        <h3>在线数据（公开接口）</h3>
-        <p className="muted" style={{ marginTop: 0 }}>
-          包含：股票列表（含每只的上市日期，个股页可看）、最新价/涨跌幅/市值/PE/PB/行业的当日快照、最近几个季度的财报、行业板块、大盘指数，
-          <strong>不含个股日线</strong>（日线在上面的「本地数据」里）。平时点「日常刷新」就够了。
-        </p>
-        <Job label="全量刷新（首次建库）" j={st.full} busy={busy} onStart={() => start("full")} />
-        <p className="muted">首次建库用，会把近 12 期财报全部拉一遍，耗时较长。上次完成: {st.last_full ?? "从未"}</p>
-        <Job label="日常刷新" j={st.incremental} busy={busy} onStart={() => start("incremental")} />
-        <p className="muted">
-          每天收盘后先点这个（它只更新列表与快照、近 2 期财报、指数，不动日线库）。上次完成: {st.last_incremental ?? "从未"}
-        </p>
-      </div>
     </>
   );
 }

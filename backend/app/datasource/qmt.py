@@ -278,6 +278,13 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
     这两类连同 `mixed_geo_rows`、`factor_backtrack_stocks` 都是**信息项，不进 warning**：
     如实入库原则下它们只影响那几行的复权口径，重导一次再点增量就自愈，不该拦整次导入。
     """
+    # 导入按 stocks 白名单过滤文件；列表为空会把所有文件滤掉、两个截止日都是空串，
+    # 后面 min() 直接崩成 "min() arg is an empty sequence"。在这里说清先去做什么。
+    if not universe:
+        raise ValueError(
+            "股票列表还是空的（导入只收在册股票的 QMT 文件）：请先到"
+            "「数据中心 → 在线数据（公开接口）」点一次「全量刷新」拿到股票列表与快照，"
+            "再回来做日线导入")
     raw_files = scan_files(raw_root, universe)
     geo_files = scan_files(geo_root, universe)
     paired = sorted(set(raw_files) & set(geo_files))
@@ -297,7 +304,10 @@ def check_pair(raw_root: str, geo_root: str, universe: dict[str, str],
     }
     res["raw_latest"] = _latest_date(raw_files)
     res["geo_latest"] = _latest_date(geo_files)
-    res["latest_date"] = min(x for x in (res["raw_latest"], res["geo_latest"]) if x) or ""
+    # default=""：两份导出都解不出任何一行时（目录里只有表头/全部坏行）也报得出生存的诊断，
+    # 而不是 min() 空序列崩溃
+    res["latest_date"] = min((x for x in (res["raw_latest"], res["geo_latest"]) if x),
+                             default="")
 
     warns: list[str] = []
     price_seen = price_aligned = amt_seen = geo_seen = geo_same = 0
