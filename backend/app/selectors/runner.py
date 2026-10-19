@@ -16,8 +16,8 @@ CONFIG_KEY = "selector_config"
 
 # 命中当时抄一份留档，页面表格直接用这些列
 ATTR_FIELDS = [
-    "code", "name", "market", "industry", "price", "pct_chg", "total_mv", "float_mv",
-    "pe_ttm", "pb", "roe_weighted", "net_profit_yoy", "turnover_rate", "amount",
+    "code", "name", "market", "industry", "industry_l1", "price", "pct_chg", "total_mv",
+    "float_mv", "pe_ttm", "pb", "roe_weighted", "net_profit_yoy", "turnover_rate", "amount",
     "trade_date", "kline_date",
 ]
 

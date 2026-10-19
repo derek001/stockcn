@@ -320,7 +320,9 @@ export default function Selectors({ onOpenStock }: { onOpenStock: (c: string) =>
                           <td>{i + 1}</td>
                           <td className="l">{r.code}</td>
                           <td className="l">{r.attrs.name ?? "-"}</td>
-                          <td className="l">{r.attrs.industry ?? "-"}</td>
+                          <td className="l">{r.attrs.industry_l1 ?? r.attrs.industry ?? "-"}
+                            {r.attrs.industry && r.attrs.industry !== r.attrs.industry_l1
+                              ? ` · ${r.attrs.industry}` : ""}</td>
                           <td><b>{fmt.n(r.score, 1)}</b></td>
                           <td className="l">{r.reason}</td>
                           <td>{fmt.n(r.attrs.price as number)}</td>

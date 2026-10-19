@@ -6,7 +6,7 @@ import time
 
 import pandas as pd
 
-from . import boxrange, db
+from . import boxrange, db, industry
 from .indicators import compute_all, tech_snapshot
 
 _OP_FN = {
@@ -20,7 +20,8 @@ _OP_FN = {
 
 # ---- field catalogue exposed to the UI ----
 FUNDAMENTAL_FIELDS = [
-    {"field": "industry", "label": "行业", "type": "multi_text", "ops": ["in", "=="]},
+    {"field": "industry_l1", "label": "一级行业", "type": "multi_text", "ops": ["in", "=="]},
+    {"field": "industry", "label": "细分行业", "type": "multi_text", "ops": ["in", "=="]},
     {"field": "market", "label": "市场", "type": "select", "options": ["SH", "SZ", "BJ"], "ops": ["in", "=="]},
     {"field": "total_mv", "label": "总市值(亿)", "type": "number", "ops": [">=", "<=", ">", "<"]},
     {"field": "float_mv", "label": "流通市值(亿)", "type": "number", "ops": [">=", "<=", ">", "<"]},
@@ -129,6 +130,8 @@ def load_universe(force: bool = False) -> dict[str, dict]:
 
     # display units: yuan -> 亿 for market cap and turnover amount
     for c, u in universe.items():
+        # 行业分组键：主板票的 industry 是一级名、科创/北交所票是细分名，统一归并出一级
+        u["industry_l1"] = industry.first_level(u.get("industry"))
         if u.get("total_mv"):
             u["total_mv"] = u["total_mv"] / 1e8
         if u.get("float_mv"):
@@ -233,6 +236,7 @@ def _row(code: str, ctx: dict) -> dict:
         "name": ctx.get("name"),
         "market": ctx.get("market"),
         "industry": ctx.get("industry"),
+        "industry_l1": ctx.get("industry_l1"),
         "price": ctx.get("price"),
         "trade_date": ctx.get("trade_date"),
         "kline_date": ctx.get("kline_date"),

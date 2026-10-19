@@ -10,10 +10,9 @@ const OP_LABEL: Record<string, string> = {
   ">=": "≥", "<=": "≤", ">": ">", "<": "<", "==": "等于", in: "属于", true: "满足",
 };
 
-export function CondRow({ cond, fields, industries, onChange, onRemove }: {
+export function CondRow({ cond, fields, onChange, onRemove }: {
   cond: Cond;
   fields: FieldDef[];
-  industries: string[];
   onChange: (c: Cond) => void;
   onRemove: () => void;
 }) {
@@ -37,14 +36,14 @@ export function CondRow({ cond, fields, industries, onChange, onRemove }: {
         <input type="number" style={{ width: 110 }} value={String(cond.value ?? "")}
           onChange={(e) => onChange({ ...cond, value: e.target.value })} />
       )}
-      {!isBool && def.field === "industry" && (
+      {!isBool && def.type === "multi_text" && (
         <select multiple value={(cond.value as string[]) ?? []} style={{ minWidth: 160, height: 56 }}
           onChange={(e) => onChange({
             ...cond,
             op: "in",
             value: Array.from(e.target.selectedOptions).map((o) => o.value),
           })}>
-          {industries.map((i) => <option key={i} value={i}>{i}</option>)}
+          {(def.options ?? []).map((i) => <option key={i} value={i}>{i}</option>)}
         </select>
       )}
       {!isBool && def.type === "select" && (
@@ -59,7 +58,9 @@ export function CondRow({ cond, fields, industries, onChange, onRemove }: {
 }
 
 export function StockResultTable({ rows, onOpenStock, selectable, checked, onCheck, onCheckAll }: {
-  rows: (Record<string, unknown> & { code: string; name: string })[];
+  rows: (Record<string, unknown> & {
+    code: string; name: string; industry?: string | null; industry_l1?: string | null;
+  })[];
   onOpenStock: (code: string) => void;
   selectable?: boolean;
   checked?: Set<string>;
@@ -109,7 +110,8 @@ export function StockResultTable({ rows, onOpenStock, selectable, checked, onChe
               )}
               <td className="l">{r.code}</td>
               <td className="l">{r.name}</td>
-              <td className="l">{(r.industry as string) ?? "-"}</td>
+              <td className="l">{r.industry_l1 ?? "-"}
+                {r.industry && r.industry !== r.industry_l1 ? ` · ${r.industry}` : ""}</td>
               {hasScore && <td><b>{fmt.n(r.score as number, 4)}</b></td>}
               <td>{fmt.n(r.price as number)}</td>
               <td dangerouslySetInnerHTML={{ __html: fmt.pct(r.pct_chg as number) }} />

@@ -64,7 +64,7 @@ export default function Screener({ onOpenStock }: { onOpenStock: (c: string) => 
       <div className="panel">
         <h3>选股条件（须同时满足全部条件）</h3>
         {conds.map((c, i) => (
-          <CondRow key={i} cond={c} fields={allFields} industries={fields.industries}
+          <CondRow key={i} cond={c} fields={allFields}
             onChange={(nc) => setConds(conds.map((x, j) => (j === i ? nc : x)))}
             onRemove={() => setConds(conds.filter((_, j) => (j !== i)))} />
         ))}

@@ -78,7 +78,7 @@ export default function AutoScreener({ onOpenStock }: { onOpenStock: (c: string)
                 </label>
               </div>
               {g.conditions.map((c, j) => (
-                <CondRow key={j} cond={c} fields={allFields} industries={fields.industries}
+                <CondRow key={j} cond={c} fields={allFields}
                   onChange={(nc) => setGroup(i, { conditions: g.conditions.map((x, k) => (k === j ? nc : x)) })}
                   onRemove={() => setGroup(i, { conditions: g.conditions.filter((_, k) => k !== j) })} />
               ))}

@@ -218,10 +218,18 @@ class AutoScreenReq(BaseModel):
 def screen_fields():
     industries = [r["industry"] for r in db.query(
         "SELECT DISTINCT industry FROM stocks WHERE industry IS NOT NULL ORDER BY industry")]
+    l1 = screening.industry.level1_names()
+    options = {"industry": industries, "industry_l1": l1}
+
+    def with_opts(defs):
+        return [{**f, "options": options[f["field"]]} if f["field"] in options else dict(f)
+                for f in defs]
+
     return {
-        "fundamental": screening.FUNDAMENTAL_FIELDS,
-        "technical": screening.TECHNICAL_FIELDS,
+        "fundamental": with_opts(screening.FUNDAMENTAL_FIELDS),
+        "technical": with_opts(screening.TECHNICAL_FIELDS),
         "industries": industries,
+        "industries_l1": l1,
     }
 
 

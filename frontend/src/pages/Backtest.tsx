@@ -9,6 +9,7 @@ interface Trade {
 }
 interface Report {
   id: string; code: string; stock_name: string; industry: string | null;
+  industry_l1: string | null;
   strategy: { id: string; name: string; params: Record<string, number> };
   range: { start: string; end: string };
   capital: number; fee_rate: number;
@@ -227,9 +228,13 @@ function ReportView({ r }: { r: Report }) {
             title={s.index_name} height={300} />
         </div>
         <div className="panel" style={{ margin: 0 }}>
-          <h3>行业指数：{r.industry ?? "-"}（成分股等权合成）</h3>
+          <h3>行业指数：{r.industry_l1 ?? r.industry ?? "-"}</h3>
+          <div className="muted" style={{ fontSize: 12, marginTop: -6, marginBottom: 8 }}>
+            一级行业成分股等权合成
+            {r.industry && r.industry !== r.industry_l1 ? `｜个股细分行业：${r.industry}` : ""}
+          </div>
           <KLineChart bars={r.board_bars} lineMode showMA={false} showVol={false}
-            title={r.industry ?? "行业"} height={300} />
+            title={r.industry_l1 ?? r.industry ?? "行业"} height={300} />
         </div>
       </div>
 

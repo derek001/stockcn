@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from . import db
+from .industry import first_level, member_names
 from .strategies.base import get_strategy
 
 
@@ -46,21 +47,18 @@ def load_index_bars(index_code: str, start: str, end: str) -> list[dict]:
     return rows
 
 
-def synthesize_board_bars(board_code: str | None, industry: str | None,
-                          start: str, end: str) -> list[dict]:
+def synthesize_board_bars(level1: str | None, start: str, end: str) -> list[dict]:
     """Industry index synthesized as equal-weighted cumulative return of
-    locally available member stocks."""
-    conds, args = [], []
-    if board_code:
-        conds.append("board_code=?")
-        args.append(board_code)
-    if industry:
-        conds.append("industry=?")
-        args.append(industry)
-    if not conds:
+    locally available member stocks. `level1` 是一级行业名，成员按 `industry`
+    归并表取（含该一级下的全部细分行业票），不再按 `board_code` 选人——那一列
+    混着腾讯板块码与东财 BK 码两套口径，主板/科创的票会互相漏。"""
+    if not level1:
         return []
-    members = db.query(
-        f"SELECT code FROM stocks WHERE {' OR '.join(conds)}", tuple(args))
+    names = member_names(level1)
+    if not names:
+        return []
+    ph = ",".join("?" * len(names))
+    members = db.query(f"SELECT code FROM stocks WHERE industry IN ({ph})", names)
     codes = sorted({m["code"] for m in members})
     if not codes:
         return []
@@ -247,9 +245,8 @@ def run_backtest(code: str, start: str, end: str, capital: float,
     idx_code = next((k for k, v in INDEXES.items() if v[0] == idx_secid), "")
     idx_name = next((v[1] for v in INDEXES.values() if v[0] == idx_secid), idx_secid)
     index_bars = load_index_bars(idx_code, start, end)
-    board_bars = synthesize_board_bars(
-        stock["board_code"] if stock else None,
-        stock["industry"] if stock else None, start, end)
+    industry_l1 = first_level(stock["industry"] if stock else None)
+    board_bars = synthesize_board_bars(industry_l1, start, end)
 
     report_id = f"{code}_{strategy_id}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}"
     report = {
@@ -257,6 +254,7 @@ def run_backtest(code: str, start: str, end: str, capital: float,
         "code": code,
         "stock_name": stock["name"] if stock else code,
         "industry": stock["industry"] if stock else None,
+        "industry_l1": industry_l1,
         "board_code": stock["board_code"] if stock else None,
         "strategy": {"id": strategy_id, "name": strategy.name, "params": params or {}},
         "range": {"start": start, "end": end},
@@ -305,7 +303,8 @@ def export_excel(report: dict) -> bytes:
     bold = Font(bold=True)
     rows = [
         ("股票代码", report["code"]), ("股票名称", report["stock_name"]),
-        ("所属行业", report["industry"]),
+        ("所属行业", report["industry_l1"]),
+        ("细分行业", report["industry"]),
         ("交易策略", report["strategy"]["name"]),
         ("回测区间", f"{report['range']['start']} ~ {report['range']['end']}"),
         ("初始资金", report["capital"]), ("手续费率", report["fee_rate"]),
