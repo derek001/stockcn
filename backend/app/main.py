@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from . import backtest as bt
 from . import backtest_batch as bt_batch
-from . import boxreplay, cycles, db, screening
+from . import boxreplay, cycles, db, rotation, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
@@ -149,6 +149,21 @@ def cycles_analysis(index: str = "sh000001", code: str = "", swing: float = 30.0
     """周期分析：三周期（年内/一轮牛熊/全历史）+ 历史相位类比。code 非空时分析个股。"""
     try:
         return cycles.analyze(index_code=index, code=code, swing=swing)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------------- rotation ----------------
+
+@app.get("/api/rotation")
+def rotation_analysis(index: str = "sh000001", years: float = 5.0, top_n: int = 5):
+    """板块轮动：市场结构 + 31 行业强弱 + 板块族轴 + 主线生命周期。
+
+    全市场重算（读 5 年日线 + 一次宽度聚合），首次约 30~50 秒；同参数二次请求命中
+    进程内缓存（基准日变了才失效），所以切指数/切主线只数很快，改年数要重扫。
+    """
+    try:
+        return rotation.analyze(index_code=index, years=years, top_n=top_n)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

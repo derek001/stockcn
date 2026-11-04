@@ -47,39 +47,56 @@ def load_index_bars(index_code: str, start: str, end: str) -> list[dict]:
     return rows
 
 
-def synthesize_board_bars(level1: str | None, start: str, end: str) -> list[dict]:
-    """Industry index synthesized as equal-weighted cumulative return of
-    locally available member stocks. `level1` 是一级行业名，成员按 `industry`
-    归并表取（含该一级下的全部细分行业票），不再按 `board_code` 选人——那一列
-    混着腾讯板块码与东财 BK 码两套口径，主板/科创的票会互相漏。"""
+def synthesize_board_frame(level1: str | None, start: str, end: str) -> dict | None:
+    """一级行业的等权净值序列 + 同口径成员的逐日成交额合计。
+
+    净值口径：成员股 `close×adj_factor` 透视成日期×股票，缺价最多补 5 根（长期停牌不编价），
+    只保留至少 1/4 交易日有价的成员，日收益截面均值累乘、起点 1000。
+    成交额用**同一批保留成员**求和，行业之间的占比才可比（板块抱团的口径基础）。
+    `level1` 是一级行业名，成员按 `industry` 归并表取（含该一级下的全部细分行业票），
+    不再按 `board_code` 选人——那一列混着腾讯板块码与东财 BK 码两套口径，主板/科创的票会互相漏。
+    """
     if not level1:
-        return []
+        return None
     names = member_names(level1)
     if not names:
-        return []
+        return None
     ph = ",".join("?" * len(names))
     members = db.query(f"SELECT code FROM stocks WHERE industry IN ({ph})", names)
     codes = sorted({m["code"] for m in members})
     if not codes:
-        return []
+        return None
     ph = ",".join("?" * len(codes))
     rows = db.query(
-        f"SELECT k.code, k.date, k.close * k.adj_factor AS close FROM kline_daily k "
+        f"SELECT k.code, k.date, k.close * k.adj_factor AS close, k.amount FROM kline_daily k "
         f"WHERE k.code IN ({ph}) AND k.date>=? AND k.date<=? ORDER BY k.date",
         (*codes, start, end))
     if not rows:
-        return []
-    df = pd.DataFrame(rows).pivot(index="date", columns="code", values="close")
-    df = df[df > 0].ffill(limit=5)
-    df = df.dropna(axis=1, thresh=max(2, len(df) // 4))
-    if df.empty or df.shape[1] == 0:
-        return []
+        return None
+    px = pd.DataFrame(rows).pivot(index="date", columns="code", values="close")
+    px = px[px > 0].ffill(limit=5)
+    px = px.dropna(axis=1, thresh=max(2, len(px) // 4))
+    if px.empty or px.shape[1] == 0:
+        return None
     # equal-weighted daily-return index of available members
-    ret = df.pct_change(fill_method=None)
+    ret = px.pct_change(fill_method=None)
     level = 1000.0 * (1 + ret.mean(axis=1, skipna=True).fillna(0)).cumprod()
+    amt = pd.DataFrame(rows).pivot(index="date", columns="code", values="amount")
+    amt = amt.reindex(columns=px.columns).sum(axis=1, min_count=1)
+    return {"dates": [str(d) for d in px.index],
+            "level": [float(v) for v in level],
+            "amount": [None if pd.isna(v) else float(v) for v in amt],
+            "n_members": int(px.shape[1]), "n_member_codes": len(codes)}
+
+
+def synthesize_board_bars(level1: str | None, start: str, end: str) -> list[dict]:
+    """行业基准K线（只有收盘价有值），口径见 `synthesize_board_frame`。"""
+    frame = synthesize_board_frame(level1, start, end)
+    if not frame:
+        return []
     out = []
     prev = None
-    for date, val in level.items():
+    for date, val in zip(frame["dates"], frame["level"]):
         if pd.isna(val):
             continue
         out.append({"date": date, "open": None, "high": None, "low": None,
