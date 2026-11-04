@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from . import backtest as bt
 from . import backtest_batch as bt_batch
-from . import boxreplay, db, screening
+from . import boxreplay, cycles, db, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
@@ -140,6 +140,17 @@ def stock_kline(code: str, start: str = "", end: str = "", adj: str = "raw",
     return {"info": info, "financials": fin, "bars": out,
             # 有几根解不出复权因子（等比那份坏掉）：adj=hfq 时这几根的价格是空的
             "factor_missing": sum(1 for r in rows if r["adj_factor"] is None)}
+
+
+# ---------------- cycles ----------------
+
+@app.get("/api/cycles")
+def cycles_analysis(index: str = "sh000001", code: str = "", swing: float = 30.0):
+    """周期分析：三周期（年内/一轮牛熊/全历史）+ 历史相位类比。code 非空时分析个股。"""
+    try:
+        return cycles.analyze(index_code=index, code=code, swing=swing)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ---------------- watch pools ----------------

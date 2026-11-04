@@ -438,7 +438,8 @@ def _refresh_indexes(provider: str) -> None:
         secid, name = meta
         try:
             if provider == "em":
-                rows = em.fetch_kline(secid, beg="20100101")
+                # 周期分析需要全历史牛熊：从 1990（A 股开市）拉起，EM push2his 支持指数全量
+                rows = em.fetch_kline(secid, beg="19900101")
             else:
                 rows = tc.fetch_kline(idx_code, days_limit=4000)
         except Exception:
