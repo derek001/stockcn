@@ -16,8 +16,13 @@ interface StrengthRow {
 interface GroupSeries { dates: string[]; a_level: (number | null)[]; b_level: (number | null)[]; spread: (number | null)[] }
 interface BenchSeries { dates: string[]; bench: (number | null)[] }
 interface MainSeries { dates: string[]; mainline: (number | null)[]; bench: (number | null)[]; conc: (number | null)[] }
-interface Loading { level1: string; loading: number; group: "A" | "B" | "-"; loading_full: number }
+interface Loading { level1: string; loading: number; group: "A" | "B" | "-" }
 interface Stability { label: string; corr_with_full: number; explained_pct: number }
+interface OverlapWithFull {
+  months: number; a_median: string | null; b_median: string | null;
+  a_min: string | null; b_min: string | null;
+  corr_median: number | null; corr_min: number | null; worst_months: string[]; note: string;
+}
 interface Spread {
   note: string; cur_month_pct: number | null; last3_pct: number | null;
   month_mean_abs_pct: number | null; month_std_pct: number | null;
@@ -36,7 +41,7 @@ interface Families {
   explained_pct_median?: number; group_a?: string[]; group_b?: string[];
   loadings?: Loading[]; flip_avg?: number | null; flip_max?: number | null;
   intra_group_corr?: { a: number | null; b: number | null } | null;
-  overlap_with_full?: { a: string; b: string }; stability?: Stability[];
+  overlap_with_full?: OverlapWithFull; stability?: Stability[];
   spread?: Spread; reversion?: Reversion;
 }
 interface Dispersion {
@@ -417,26 +422,31 @@ export default function Rotation() {
           <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))" }}>
             {fam?.available && (
               <div className="panel" style={{ marginBottom: 0 }}>
-                <h3>族载荷（当月因果版 vs 全样本前视版）</h3>
+                <h3>族载荷（每月只用当月之前的数据算）</h3>
                 <div className="table-wrap" style={{ maxHeight: 380 }}>
                   <table>
-                    <thead><tr><th className="l">行业</th><th>因果载荷</th><th>组</th><th>前视载荷</th></tr></thead>
+                    <thead><tr><th className="l">行业</th><th>载荷</th><th>组</th></tr></thead>
                     <tbody>
                       {(fam.loadings ?? []).map((l) => (
                         <tr key={l.level1}>
                           <td className="l">{l.level1}</td>
                           <td className={pctCls(l.loading)}>{l.loading.toFixed(3)}</td>
                           <td className={l.group === "A" ? "up" : l.group === "B" ? "down" : "muted"}>{l.group}</td>
-                          <td className="muted">{l.loading_full.toFixed(3)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-                  因果版与全样本版分组重合度 A {fam.overlap_with_full?.a}、B {fam.overlap_with_full?.b}；
-                  重合高说明「族」这件事不是靠后视拼出来的。
-                </div>
+                {fam.overlap_with_full && (
+                  <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                    和全样本分组的重合度（{fam.overlap_with_full.months} 个历史月，不含本月）：
+                    A 组中位 {fam.overlap_with_full.a_median ?? "-"}、最低 {fam.overlap_with_full.a_min ?? "-"}；
+                    B 组中位 {fam.overlap_with_full.b_median ?? "-"}、最低 {fam.overlap_with_full.b_min ?? "-"}；
+                    载荷相关中位 {fam.overlap_with_full.corr_median ?? "-"}、最低 {fam.overlap_with_full.corr_min ?? "-"}
+                    （最差的几个月：{fam.overlap_with_full.worst_months.join("、") || "-"}）。
+                    {fam.overlap_with_full.note}
+                  </div>
+                )}
               </div>
             )}
             <div className="panel" style={{ marginBottom: 0 }}>

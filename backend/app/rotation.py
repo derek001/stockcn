@@ -241,7 +241,7 @@ def _breadth_panel(win_start: str, ytd_start: str, d20: str, d60: str,
         "adv_n": adv, "dec_n": dec, "flat_n": flat,
         "above_ma20_pct": round(100 * above20 / n_active, 1) if n_active else None,
         "above_ma60_pct": round(100 * above60 / n_active, 1) if n_active else None,
-        "window_years_note": f"新高/新低按窗口起点 {win_start} 至今的复权收盘价比较",
+        "window_years_note": "新高/新低（基准＝上方分析窗口内的最高/最低复权收盘，非上市以来全历史）",
     }
     if len(_BREADTH_CACHE) > 3:
         _BREADTH_CACHE.clear()
@@ -426,16 +426,41 @@ def _family_panel(nav: pd.DataFrame) -> dict:
                     "explained_pct": round(ev * 100, 0)})
     fa, fb = _groups(full_v)
     loadings = [{"level1": k, "loading": round(float(v), 3),
-                 "group": "A" if v >= LOADING_CUT else "B" if v <= -LOADING_CUT else "-",
-                 "loading_full": round(float(full_v[k]), 3)}
+                 "group": "A" if v >= LOADING_CUT else "B" if v <= -LOADING_CUT else "-"}
                 for k, v in vecs[cur_month].sort_values(ascending=False).items()]
+    # 逐月对照：末月因果版＝全样本（同一份数据），是恒等不是证据，所以拿前面每个月去比重合度
+    agree = []
+    for m, a, b, _ev in sets[:-1]:
+        v_m = vecs[m]
+        agree.append((str(m), len(set(a) & set(fa)), len(fa),
+                      len(set(b) & set(fb)), len(fb),
+                      float(np.corrcoef(v_m.sort_index(), full_v.sort_index())[0, 1])))
+    corrs = [x[5] for x in agree]
+    worst = sorted(agree, key=lambda x: x[5])[:3]
+
+    def _fr(pair: tuple[list[int], list[int]]) -> str | None:
+        return f"{int(np.median(pair[0]))}/{int(np.median(pair[1]))}" if agree else None
+
+    overlap_with_full = {
+        "months": len(agree),
+        "a_median": _fr(([x[1] for x in agree], [x[2] for x in agree])),
+        "b_median": _fr(([x[3] for x in agree], [x[4] for x in agree])),
+        "a_min": f"{min(x[1] for x in agree)}/{max(x[2] for x in agree)}" if agree else None,
+        "b_min": f"{min(x[3] for x in agree)}/{max(x[4] for x in agree)}" if agree else None,
+        "corr_median": round(float(np.median(corrs)), 3) if corrs else None,
+        "corr_min": round(float(np.min(corrs)), 3) if corrs else None,
+        "worst_months": [f"{x[0]} 载荷相关 {x[5]:.2f}（B {x[3]}/{x[4]}）" for x in worst],
+        "note": "本月的分组和「全样本分组」是同一批数据算出来的，重合是必然，不能当证据；"
+                "这里拿其余每个月分别和全样本比，重合越高说明族的划分不依赖后视。",
+    }
     series = _downsample(list(a_level.index), {
         "a_level": list(a_level), "b_level": list(b_level),
         "spread": list((a_level / b_level - 1) * 100)})
     adj = float(np.corrcoef(sp.iloc[:-1], sp.iloc[1:])[0, 1]) if len(sp) > 8 else None
     return {
         "available": True,
-        "method": f"残差日收益相关阵第 1 主成分（载荷 ±{LOADING_CUT} 分组，每月只用当月之前数据重算）",
+        "method": f"残差日收益相关阵第 1 主成分（载荷 ±{LOADING_CUT} 分组，"
+                  f"每月末用截至当月末的数据重算，月内不看未来）",
         "months_tested": len(sets),
         "current_month": cur_month,
         "full_sample_explained_pct": round(full_ev * 100, 0),
@@ -446,8 +471,7 @@ def _family_panel(nav: pd.DataFrame) -> dict:
         "flip_avg": round(float(np.mean(flips)), 1) if flips else None,
         "flip_max": max(flips) if flips else None,
         "intra_group_corr": None,   # analyze 里补（需要 nav）
-        "overlap_with_full": {"a": f"{len(set(group_a) & set(fa))}/{len(fa)}",
-                              "b": f"{len(set(group_b) & set(fb))}/{len(fb)}"},
+        "overlap_with_full": overlap_with_full,
         "stability": seg,
         "spread": {
             "note": "族价差 = A 组等权月收益 − B 组等权月收益；累计分位只说明「贵不贵」，"
