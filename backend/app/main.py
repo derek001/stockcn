@@ -91,17 +91,32 @@ class F10RunReq(BaseModel):
     confirm: bool = False           # 大批量请求需操作者明确确认
 
 
+class F10RebuildReq(BaseModel):
+    cover: float | None = None      # 负债表档覆盖率；不传就沿库里名单上次用的那套
+    cf_top: int | None = None       # 现金流档每行业前 N
+
+
+def _f10_params(cover: float | None, cf_top: int | None) -> tuple[float, int]:
+    """不合法就 400，并把可用区间写进提示（页面按同一规则拦按钮）。"""
+    c, t = capital.resolve_params(cover, cf_top)
+    problems = capital.check_params(c, t)
+    if problems:
+        raise HTTPException(400, "名单门槛不成立：" + "；".join(problems) + "，名单没改")
+    return c, t
+
+
 @app.get("/api/data/f10/preview")
-def f10_preview():
-    return capital.preview()
+def f10_preview(cover: float | None = None, cf_top: int | None = None):
+    return capital.preview(*_f10_params(cover, cf_top))
 
 
 @app.post("/api/data/f10/sample/rebuild")
-def f10_sample_rebuild():
+def f10_sample_rebuild(body: F10RebuildReq | None = None):
     """按最新财报重算样本名单（只写名单，不联网）。"""
     if updater.is_busy():
         raise HTTPException(409, "已有更新任务在运行")
-    return capital.rebuild_sample()
+    b = body or F10RebuildReq()
+    return capital.rebuild_sample(*_f10_params(b.cover, b.cf_top))
 
 
 @app.post("/api/data/f10/run")

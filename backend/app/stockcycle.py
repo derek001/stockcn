@@ -1,7 +1,8 @@
 """行业库存与资本周期（财报侧）：31 个申万一级行业的四象限定位。
 
 数据来源是 `fin_capital`（东财 F10 资产负债表 + 现金流量表，由「数据中心 → F10 报表数据」
-回填），样本名单 `f10_sample` 只覆盖每行业营收 70%（负债表档）/ 前 10（现金流档）的票。
+回填），样本名单 `f10_sample` 只覆盖每行业营收的一定比例（负债表档）/ 前 N（现金流档），
+那套门槛在数据中心页可调，本模块按名单里记下来的实际口径显示。
 
 四象限的两条轴都是**同期比同期**的同比：存货期末余额、资本开支累计值。现金流表给的是
 年初至今累计数，同期比就不需要差分，也躲开季节性；代价是只回答「比去年同期多了还是少了」。
@@ -18,7 +19,7 @@ from __future__ import annotations
 import datetime as dt
 from collections import defaultdict
 
-from . import db, industry
+from . import capital, db, industry
 
 MIN_COVER = 0.60      # 某期要有该表名单里这么多只票有数，才当「最新可用期」
 MIN_CODES = 5         # 一个行业至少几只票两期齐，才参与四象限
@@ -50,8 +51,6 @@ QUADRANT_DESC = {
 }
 
 CAVEATS = [
-    "样本不是全行业：负债表档只覆盖每行业营收 70%（自适应只数），现金流档只覆盖各行业营收前 10 只；"
-    "银行、非银金融整体不抓（报表口径不同）。",
     "同比只按「两期都有数的同一批票」算：合计同比受大公司主导，逐只同比中位是等权口径，"
     "两个数不一致是正常的；基期为 0 的票算不出百分比，只进合计、不进中位。",
     "现金流量表给的是年初至今累计数，所以是同期比同期、不做差分：只回答「比去年同期多还是少」，"
@@ -62,6 +61,14 @@ CAVEATS = [
     "行业归属和样本名单用的是今天的快照往回算，有幸存者与回溯偏差；这页只描述行业当前在补库还是去库、"
     "在扩产还是收缩，不构成买卖信号。",
 ]
+
+
+def caveats(cover: float | None = None, cf_top: int | None = None) -> list[str]:
+    """第一条要说清「这页的样本是按哪套门槛挑的」，所以数字取名单里记下来的那套，不写死。"""
+    c, t = capital.resolve_params(cover, cf_top)
+    return [f"样本不是全行业：负债表档只覆盖每行业营收 {capital.cover_text(c)}（自适应只数），"
+            f"现金流档只覆盖各行业营收前 {t} 只；这套门槛在「数据中心 → F10 报表数据」页可调，"
+            "这里显示的就是当前名单用的那套。银行、非银金融整体不抓（报表口径不同）。"] + CAVEATS
 
 
 def _last_year(period: str) -> str:
@@ -149,16 +156,23 @@ def _quadrant(inv: float | None, cap: float | None) -> dict:
 
 def analyze() -> dict:
     data = _load()
+    sample = capital.params()
     n_bal = db.query_one("SELECT COUNT(*) n FROM f10_sample WHERE need_balance=1")["n"]
     n_cash = db.query_one("SELECT COUNT(*) n FROM f10_sample WHERE need_cash=1")["n"]
     flat = _flat(data)
     bal_p = _pick_period(flat, "inventory", n_bal)
     cash_p = _pick_period(flat, "capex_cash", n_cash)
     if not bal_p and not cash_p:
-        return {"ok": False, "reason": "库里还没有 F10 报表数据",
-                "action": "到「数据中心 → F10 报表数据」重建名单后点「开始回填」"
-                          "（首轮约 3,912 次请求，要先勾选确认）",
-                "levels": [], "periods": {}, "meta": {}}
+        left = capital.requests_needed(capital.pending(), capital.PERIODS)
+        action = (
+            "到「数据中心 → F10 报表数据」点「重建名单」，再点「开始回填」"
+            if not left else
+            f"到「数据中心 → F10 报表数据」重建名单后点「开始回填」"
+            f"（按当前门槛「{capital.cover_text(sample['cover'])} / 前 {sample['cf_top']}」"
+            f"还要约 {left:,} 次请求，超过确认线要先勾选）")
+        return {"ok": False, "reason": "库里还没有 F10 报表数据", "action": action,
+                "levels": [], "periods": {},
+                "meta": {"sample": sample, "caveats": caveats(**sample)}}
     bal_q = _last_year(bal_p) if bal_p else None
     cash_q = _last_year(cash_p) if cash_p else None
 
@@ -196,7 +210,7 @@ def analyze() -> dict:
             "denominator": {"n_balance": n_bal, "n_cash": n_cash},
             "meta": {"min_cover": MIN_COVER, "min_codes": MIN_CODES, "flat_pp": FLAT_PP,
                      "n_levels": len(levels), "n_ready": len(ready),
-                     "caveats": CAVEATS,
+                     "sample": sample, "caveats": caveats(**sample),
                      "quadrant_counts": dict(sorted(counts.items(), key=lambda kv: -kv[1]))},
             "levels": levels}
 

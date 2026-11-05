@@ -16,12 +16,20 @@ interface F10Level {
   n_balance: number; n_cash: number; cover_pct: number | null;
 }
 interface F10Preview {
+  params: {
+    cover: number; cf_top: number;
+    cover_range: [number, number]; cf_top_range: [number, number];
+    default_cover: number; default_cf_top: number;
+  };
   levels: F10Level[];
   totals: { n_codes: number; n_balance: number; n_cash: number; requests_est: number };
   stored: {
-    built_at: string | null; revenue_periods: (string | null)[] | null;
+    built_at: string | null; cover: number | null; cf_top: number | null;
+    revenue_periods: (string | null)[] | null;
     n_codes: number; added: number; removed: number;
   };
+  // 按当前这套门槛重建名单之后还欠多少（已抓过的那张表抵扣掉）
+  if_rebuilt: { codes: number; units: number; requests: number };
   backfilled: {
     n_codes: number; rows: number;
     todo_units: number; todo_codes: number; requests_left: number; confirm_at: number;
@@ -38,6 +46,11 @@ interface Preview {
 
 function pctOf(j: JobState) {
   return j.total ? Math.round((j.progress / j.total) * 100) : j.status === "running" ? 5 : 0;
+}
+
+// 覆盖率在小数位上是 0.725 这类值，折成百分比只保留一位，别显示成 72.50000000000001%
+function covLabel(v: number | null | undefined) {
+  return v === null || v === undefined ? "-" : `${Math.round(v * 1000) / 10}%`;
 }
 
 function Job({ label, j, busy, onStart }: {
@@ -67,6 +80,9 @@ export default function DataCenter() {
   const [f10pv, setF10pv] = useState<F10Preview | null>(null);
   const [f10Note, setF10Note] = useState("");
   const [f10Confirm, setF10Confirm] = useState(false);
+  const [f10Cover, setF10Cover] = useState("");      // 负债表档覆盖率（%，如 70）
+  const [f10CfTop, setF10CfTop] = useState("");      // 现金流档每行业前 N（只）
+  const f10Used = useRef<{ cover: number; cfTop: number } | null>(null);
   const [showLevels, setShowLevels] = useState(false);
   const [pollErr, setPollErr] = useState("");
   const filled = useRef(false);
@@ -130,10 +146,39 @@ export default function DataCenter() {
     }
   };
 
-  const loadF10 = () =>
-    api.get<F10Preview>("/api/data/f10/preview")
-      .then(setF10pv)
-      .catch((e) => setErr(String((e as Error).message)));
+  const loadF10 = (cover?: number, cfTop?: number): Promise<F10Preview | null> => {
+    // 不传参就按「上一次预览用的门槛」重取；只有首屏（还没取过）才让后端按库里名单的口径算
+    const use = cover !== undefined && cfTop !== undefined ? { cover, cfTop } : f10Used.current;
+    const qs = use ? `?cover=${use.cover}&cf_top=${use.cfTop}` : "";
+    return api.get<F10Preview>("/api/data/f10/preview" + qs)
+      .then((r) => {
+        f10Used.current = { cover: r.params.cover, cfTop: r.params.cf_top };
+        setF10pv(r);
+        if (!use) {
+          // 输入框回到库里名单实际用的那套门槛（保留一位小数，避免 72.5% 被折成 73%）
+          setF10Cover(String(Math.round((r.stored.cover ?? r.params.default_cover) * 1000) / 10));
+          setF10CfTop(String(r.stored.cf_top ?? r.params.default_cf_top));
+        }
+        return r;
+      })
+      .catch((e) => { setErr(String((e as Error).message)); return null; });
+  };
+
+  const f10CoverNum = Number(f10Cover);
+  const f10CfTopNum = Number(f10CfTop);
+  const covLo = Math.round((f10pv?.params.cover_range[0] ?? 0.3) * 100);
+  const covHi = Math.round((f10pv?.params.cover_range[1] ?? 0.95) * 100);
+  const cfLo = f10pv?.params.cf_top_range[0] ?? 3;
+  const cfHi = f10pv?.params.cf_top_range[1] ?? 50;
+  const f10Problems: string[] = [];
+  if (!f10Cover || !Number.isFinite(f10CoverNum) || f10CoverNum < covLo || f10CoverNum > covHi)
+    f10Problems.push(`资产负债表档覆盖率要填 ${covLo}%~${covHi}% 之间的数`);
+  if (!f10CfTop || !Number.isInteger(f10CfTopNum) || f10CfTopNum < cfLo || f10CfTopNum > cfHi)
+    f10Problems.push(`现金流量表档要填 ${cfLo}~${cfHi} 之间的整数（每行业营收前 N 只）`);
+  // 输入改了但还没点预览：下面的数字仍是上一次那套门槛算出来的，得说清，不能让它看着像新结果
+  const f10Dirty = !!f10pv && f10Problems.length === 0
+    && (Math.abs(f10pv.params.cover * 100 - f10CoverNum) > 1e-9
+      || f10pv.params.cf_top !== f10CfTopNum);
 
   const f10WasRunning = useRef(false);
   useEffect(() => {
@@ -164,10 +209,17 @@ export default function DataCenter() {
   };
 
   const rebuildF10Sample = async () => {
-    setErr("");
+    setErr(""); setF10Note("");
     try {
-      await api.post("/api/data/f10/sample/rebuild");
-      await loadF10();
+      await api.post("/api/data/f10/sample/rebuild",
+        { cover: f10CoverNum / 100, cf_top: f10CfTopNum });
+      const r = await loadF10(f10CoverNum / 100, f10CfTopNum);
+      if (r) {
+        setF10Note(`名单已按「覆盖率 ${f10Cover}% / 现金流前 ${f10CfTop}」重建：`
+          + `${r.totals.n_codes} 只（资产负债表 ${r.totals.n_balance}、现金流量表 ${r.totals.n_cash}），`
+          + `重建后还欠 ${r.if_rebuilt.codes} 只 / ${r.if_rebuilt.units} 张表`
+          + ` ≈ ${r.if_rebuilt.requests} 次请求（点「开始回填」才会真的去抓）。`);
+      }
     } catch (e) {
       setErr(String((e as Error).message));
     }
@@ -331,9 +383,17 @@ export default function DataCenter() {
           名单只覆盖各行业营收占比靠前的一部分股票，不是全市场。
         </p>
         <p className="muted" style={{ marginTop: 0 }}>
-          怎么做：① 点「刷新预览」看名单和已抓情况；② 点「开始回填」抓数据（约一小时，可随时离开页面）；
+          怎么做：① 先看预览（名单只数、已抓、待抓请求数）；② 点「开始回填」抓数据（约一小时，可随时离开页面），
           一次请求数超过 {f10pv?.backfilled.confirm_at ?? 200} 次时要先勾下面的确认框才能起；
-          ③ 每天做完「在线数据 → 日常刷新」后，名单会随最新财报变化，先点「重建名单」再回填新增的票。
+          ③ 每天做完「在线数据 → 日常刷新」后点一次「重建名单」，新股会随最新财报进名单
+          （用的就是下面两个输入框里的门槛）。
+        </p>
+        <p className="muted" style={{ marginTop: 0 }}>
+          名单门槛可以调：资产负债表档按「每个行业营收累计盖到多少」取最少只数，现金流量表档按「每个行业营收前 N 只」。
+          改完点「按这套门槛预览」看会变成几只、还要发多少请求，再点「重建名单」写入（重建只改名单，不联网）。
+          调大＝多抓几只（待抓请求数会变，超过确认线要重新勾选）；调小不会删掉已抓的数据，只是名单外的票
+          不再进「行业库存周期」页的统计。默认 70% / 前 10 是实测够用的档位。
+          「开始回填」只按库里已存的名单抓，和输入框里临时改的数字无关：想按新门槛抓，先「重建名单」。
         </p>
         <p className="up" style={{ marginTop: 0 }}>
           注意：回填期间不要同时跑其他数据任务；中途断了或失败，直接再点一次「开始回填」会接着抓没完成的股票，
@@ -344,9 +404,34 @@ export default function DataCenter() {
           <span>{pctOf(st.f10)}%</span>
           <span className={st.f10.status === "error" ? "up" : "muted"}>{st.f10.message}</span>
         </div>
+        <div className="row" style={{ marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="muted">负债表档覆盖率</span>
+          <input style={{ width: 64 }} value={f10Cover} inputMode="decimal"
+            placeholder={String(Math.round((f10pv?.params.default_cover ?? 0.7) * 1000) / 10)}
+            onChange={(e) => setF10Cover(e.target.value.trim())} />
+          <span className="muted">%（{covLo}~{covHi}）</span>
+          <span className="muted" style={{ marginLeft: 10 }}>现金流档前</span>
+          <input style={{ width: 52 }} value={f10CfTop} inputMode="numeric"
+            placeholder={String(f10pv?.params.default_cf_top ?? 10)}
+            onChange={(e) => setF10CfTop(e.target.value.trim())} />
+          <span className="muted">只（{cfLo}~{cfHi}）</span>
+          <button className="btn" disabled={busy || f10Problems.length > 0}
+            onClick={() => loadF10(f10CoverNum / 100, f10CfTopNum)}>按这套门槛预览</button>
+          <button className="btn" disabled={busy || f10Problems.length > 0}
+            onClick={rebuildF10Sample}>重建名单</button>
+        </div>
+        {f10Problems.length > 0 && (
+          <p className="up" style={{ margin: "4px 0 0" }}>
+            {`门槛不成立：${f10Problems.join("；")}。改对了才能预览和重建名单。`}
+          </p>
+        )}
+        {f10Dirty && (
+          <p className="up" style={{ margin: "4px 0 0" }}>
+            {`输入框已改成「${f10Cover}% / 前 ${f10CfTop}」，但下面的数字还是「${covLabel(f10pv?.params.cover)}`
+              + ` / 前 ${f10pv?.params.cf_top}」算的。点「按这套门槛预览」看新数字，或点「重建名单」直接写入。`}
+          </p>
+        )}
         <div className="row" style={{ marginTop: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <button className="btn" onClick={loadF10}>刷新预览</button>
-          <button className="btn" disabled={busy} onClick={rebuildF10Sample}>重建名单</button>
           <button className="btn primary" disabled={busy || f10NeedConfirm && !f10Confirm} onClick={runF10}>
             {st.f10.status === "running" ? "回填中…" : "开始回填"}
           </button>
@@ -370,13 +455,21 @@ export default function DataCenter() {
         {f10pv && (
           <>
             <div className="row" style={{ marginTop: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <span className="badge">名单: {f10pv.stored.n_codes} 只</span>
-              <span className="badge">资产负债表: {f10pv.totals.n_balance} 只</span>
-              <span className="badge">现金流量表: {f10pv.totals.n_cash} 只</span>
-              <span className="badge">预计请求: 约 {f10pv.totals.requests_est} 次</span>
+              <span className="badge">
+                {`库里名单: ${f10pv.stored.n_codes} 只（门槛 ${covLabel(f10pv.stored.cover)}`
+                  + ` / 前 ${f10pv.stored.cf_top ?? "-"}，建于 ${f10pv.stored.built_at ?? "未记录"}）`}
+              </span>
+              <span className="badge">
+                {`按这套门槛: ${f10pv.totals.n_codes} 只（资产负债表 ${f10pv.totals.n_balance}`
+                  + `、现金流量表 ${f10pv.totals.n_cash}，全抓约 ${f10pv.totals.requests_est} 次请求）`}
+              </span>
+              <span className={f10pv.if_rebuilt.units ? "badge up" : "badge"}>
+                {`重建后还欠: ${f10pv.if_rebuilt.codes} 只 / ${f10pv.if_rebuilt.units} 张表`
+                  + `（约 ${f10pv.if_rebuilt.requests} 次请求）`}
+              </span>
               <span className="badge">已抓: {f10pv.backfilled.n_codes} 只 / {f10pv.backfilled.rows} 行</span>
               <span className={f10pv.backfilled.todo_units ? "badge up" : "badge"}>
-                {`待抓: ${f10pv.backfilled.todo_codes} 只 / ${f10pv.backfilled.todo_units} 张表`
+                {`开始回填会抓: ${f10pv.backfilled.todo_codes} 只 / ${f10pv.backfilled.todo_units} 张表`
                   + `（约 ${f10pv.backfilled.requests_left} 次请求）`}
               </span>
               <button className="btn" onClick={() => setShowLevels((v) => !v)}>
@@ -384,8 +477,9 @@ export default function DataCenter() {
               </button>
             </div>
             <p className="muted" style={{ marginTop: 4 }}>
-              {`名单按最新财报营收重算后有 ${f10pv.stored.added} 只新增、${f10pv.stored.removed} 只退出`
-                + "（点「重建名单」写入）。"}
+              {`按「${covLabel(f10pv.params.cover)} / 前 ${f10pv.params.cf_top}」重算名单会有`
+                + ` ${f10pv.stored.added} 只新增、${f10pv.stored.removed} 只退出（点「重建名单」写入）。`}
+              {"「重建后还欠」= 换成这套门槛后还没抓过的表；「开始回填会抓」= 按库里现有名单算的量，两者不等说明名单该重建了。"}
             </p>
             {showLevels && (
               <div className="table-wrap" style={{ marginTop: 8, maxHeight: 420 }}>

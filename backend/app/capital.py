@@ -1,11 +1,14 @@
 """东财 F10 资本开支口径：混合档样本名单 + 回填 + 落库。
 
-样本口径（2026-11-05 实测定案）：
+样本口径（2026-11-05 实测定案，两个门槛在「数据中心 → F10 报表数据」页可调）：
 - 分组键＝申万一级（`industry.first_level`）；银行/非银金融共 121 只整体剔除（报表口径不同）；
-- 资产负债表档＝每行业按年报营收累计盖到 70% 的最少只数（自适应，实测 688 只，
-  最少的行业 2 只＝石油石化，最多的 82 只＝基础化工）；
-- 现金流量表档＝每行业营收前 10（实测 290 只）；两档去重 722 只；
-- 一次请求最多带 5 个报告期，所以 20 期＝每表 4 次请求，合计约 3,912 次、实测 0.81s/次 ≈ 55 分钟。
+- 资产负债表档＝每行业按年报营收累计盖到 `COVER`（默认 70%，可调 30%~95%）的最少只数
+  （自适应，默认档实测 688 只，最少的行业 2 只＝石油石化，最多的 82 只＝基础化工）；
+- 现金流量表档＝每行业营收前 `CF_TOP`（默认 10，可调 3~50；默认档实测 290 只）；两档去重 722 只；
+- 一次请求最多带 5 个报告期，所以 20 期＝每表 4 次请求，默认档合计约 3,912 次、实测 0.81s/次 ≈ 55 分钟。
+
+门槛用哪一套**记在名单里**（`kv` 的 `f10_capital_meta`），所以「重建名单」不传参就沿用上次的口径，
+预览不传参就按库里名单实际用的那套算 —— 改门槛只有一点：调大 ⇒ 新增的票变成待抓，按请求数重新确认。
 
 数值一律按接口原样记（元），接口没给的期留 NULL 而不是拦在库外：数据薄是当期事实，
 下次重跑同一只即自愈。
@@ -18,8 +21,10 @@ from collections import defaultdict
 from . import db, industry
 from .datasource import f10
 
-COVER = 0.70                 # 资产负债表档要盖到的行业营收占比
-CF_TOP = 10                  # 现金流量表档：每行业营收前 N
+COVER = 0.70                 # 资产负债表档要盖到的行业营收占比（页面可调）
+CF_TOP = 10                  # 现金流量表档：每行业营收前 N（页面可调）
+COVER_RANGE = (0.30, 0.95)   # 再低就盖不出行业结论，再高名单接近全市场、请求数失控
+CF_TOP_RANGE = (3, 50)       # 下限跟着四象限页的 MIN_CODES=5 走，上限防手滑
 PERIODS = 20                 # 回填深度：5 年 × 4 期
 FINANCE = {"银行", "非银金融"}
 META_KEY = "f10_capital_meta"
@@ -32,6 +37,46 @@ def requests_per_table(periods: int = PERIODS) -> int:
 
 def requests_needed(plan: list[tuple[str, tuple[str, ...]]], periods: int = PERIODS) -> int:
     return sum(len(t) for _c, t in plan) * requests_per_table(periods)
+
+
+def params() -> dict:
+    """名单当前用的门槛（建名单时记进 kv）；没建过名单就回代码默认值。"""
+    meta = db.kv_get(META_KEY, {}) or {}
+    return {"cover": float(meta.get("cover", COVER)), "cf_top": int(meta.get("cf_top", CF_TOP))}
+
+
+def cover_text(cover: float) -> str:
+    """覆盖率写成人话：0.7→70%、0.725→72.5%（用 .0% 会折成 73%，和页面输入框对不上）。"""
+    return f"{round(float(cover) * 1000) / 10:g}%"
+
+
+def check_params(cover, cf_top) -> list[str]:
+    """门槛是否可用；返回问题列表（空=可用）。页面按它拦按钮，后端按它返 400。"""
+    problems = []
+    c_lo, c_hi = COVER_RANGE
+    try:
+        c = float(cover)
+    except (TypeError, ValueError):
+        c = float("nan")
+    if not c_lo <= c <= c_hi:
+        problems.append(f"负债表档覆盖率要用 {c_lo:.0%}~{c_hi:.0%} 之间的数（现在 {cover}）")
+    t_lo, t_hi = CF_TOP_RANGE
+    try:
+        t = float(cf_top)
+    except (TypeError, ValueError):
+        t = float("nan")
+    if t != int(t) or not t_lo <= int(t) <= t_hi:
+        problems.append(f"现金流量表档「前 N」要是 {t_lo}~{t_hi} 之间的整数（现在 {cf_top}）")
+    return problems
+
+
+def resolve_params(cover=None, cf_top=None) -> tuple[float, int]:
+    p = params()
+    if cover is not None:
+        p["cover"] = float(cover)
+    if cf_top is not None:
+        p["cf_top"] = int(cf_top)
+    return p["cover"], p["cf_top"]
 
 
 def _revenue_base() -> tuple[dict[str, float], dict[str, str], tuple[str | None, str | None]]:
@@ -58,8 +103,9 @@ def _revenue_base() -> tuple[dict[str, float], dict[str, str], tuple[str | None,
     return rev, src, periods
 
 
-def sample_rows(cover: float = COVER, cf_top: int = CF_TOP):
+def sample_rows(cover: float | None = None, cf_top: int | None = None):
     """返回 (样本行, 逐行业统计, 排序基准期)。样本行 = {code, level1, revenue, rank, need_balance, need_cash}。"""
+    cover, cf_top = resolve_params(cover, cf_top)
     rev, _src, periods = _revenue_base()
     by_level: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for code, ind in db.query_rows("SELECT code, industry FROM stocks WHERE is_active=1"):
@@ -96,8 +142,12 @@ def sample_rows(cover: float = COVER, cf_top: int = CF_TOP):
     return rows, levels, periods
 
 
-def rebuild_sample(cover: float = COVER, cf_top: int = CF_TOP) -> dict:
-    """按当前财报重算样本名单并整表替换（名单本身几百行，重写代价可忽略）。"""
+def rebuild_sample(cover: float | None = None, cf_top: int | None = None) -> dict:
+    """按当前财报重算样本名单并整表替换（名单本身几百行，重写代价可忽略）。
+
+    不传参就沿用名单上次用的门槛，所以「每日重建」不会因为代码默认值把口径悄悄改回去。
+    """
+    cover, cf_top = resolve_params(cover, cf_top)
     rows, levels, periods = sample_rows(cover, cf_top)
     now = dt.datetime.now().isoformat(timespec="seconds")
     with db.transaction() as conn:
@@ -115,22 +165,38 @@ def rebuild_sample(cover: float = COVER, cf_top: int = CF_TOP) -> dict:
     return {"sample": meta, "levels": levels}
 
 
-def preview(cover: float = COVER, cf_top: int = CF_TOP) -> dict:
-    """面板用：当前库里名单 vs 按最新财报重算的名单差多少，以及逐行业覆盖率。"""
+def preview(cover: float | None = None, cf_top: int | None = None) -> dict:
+    """面板用：按这套门槛重算的名单 vs 库里名单差多少、重建后还欠多少请求，以及逐行业覆盖率。
+
+    不传参就按库里名单实际用的那套门槛算（`params()`），所以页面没改输入时看到的数字
+    就是当前名单的口径；改了输入就等于「重建之后会变成什么样」。
+    """
+    cover, cf_top = resolve_params(cover, cf_top)
     rows, levels, _periods = sample_rows(cover, cf_top)
     want = {r["code"] for r in rows}
-    stored = {r["code"] for r in db.query_rows("SELECT code FROM f10_sample")}
+    stored_rows = db.query_rows("SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code")
+    stored = {r["code"] for r in stored_rows}
     got = {r[0] for r in db.query_rows("SELECT DISTINCT code FROM fin_capital")}
+    done = _done_tables()
+    new_todo = _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in rows], done)
+    left = _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in stored_rows], done)
     n_bs = sum(1 for r in rows if r["need_balance"])
     n_cf = sum(1 for r in rows if r["need_cash"])
-    left = pending()
-    return {"levels": levels,
+    meta = db.kv_get(META_KEY, {}) or {}
+    return {"params": {"cover": cover, "cf_top": cf_top, "cover_range": list(COVER_RANGE),
+                       "cf_top_range": list(CF_TOP_RANGE),
+                       "default_cover": COVER, "default_cf_top": CF_TOP},
+            "levels": levels,
             "totals": {"n_codes": len(rows), "n_balance": n_bs, "n_cash": n_cf,
                        "requests_est": (n_bs + n_cf) * requests_per_table()},
-            "stored": {"built_at": db.kv_get(META_KEY, {}).get("built_at"),
-                       "revenue_periods": db.kv_get(META_KEY, {}).get("revenue_periods"),
+            "stored": {"built_at": meta.get("built_at"), "cover": meta.get("cover"),
+                       "cf_top": meta.get("cf_top"),
+                       "revenue_periods": meta.get("revenue_periods"),
                        "n_codes": len(stored),
                        "added": len(want - stored), "removed": len(stored - want)},
+            # 按这套门槛重建名单之后还要发多少请求（已抓过的那张表抵扣掉）
+            "if_rebuilt": {"codes": len(new_todo), "units": sum(len(t) for _c, t in new_todo),
+                           "requests": requests_needed(new_todo)},
             "backfilled": {"n_codes": len(got), "rows": db.query_one(
                 "SELECT COUNT(*) n FROM fin_capital")["n"],
                 # todo_units = 还欠几张表（一只票可能只欠现金流量表）
@@ -140,24 +206,35 @@ def preview(cover: float = COVER, cf_top: int = CF_TOP) -> dict:
                 "confirm_at": CONFIRM_AT}}
 
 
+def _done_tables() -> dict[str, set[str]]:
+    """每张表「已经抓过」的票（同 code 抓过 balance 不代表抓过 cash）。"""
+    return {"balance": {r[0] for r in db.query_rows(
+                "SELECT code FROM fin_capital WHERE has_balance=1")},
+            "cash": {r[0] for r in db.query_rows(
+                "SELECT code FROM fin_capital WHERE has_cash=1")}}
+
+
+def _todo(rows: list[tuple[str, int, int]], done: dict[str, set[str]],
+          force: bool = False) -> list[tuple[str, tuple[str, ...]]]:
+    out = []
+    for code, need_bs, need_cf in rows:
+        want = tuple(n for n, flag in (("balance", need_bs), ("cash", need_cf)) if flag)
+        todo = tuple(n for n in want if force or code not in done[n])
+        if todo:
+            out.append((code, todo))
+    return out
+
+
 def pending(force: bool = False) -> list[tuple[str, tuple[str, ...]]]:
     """名单里还欠抓的 (代码, 要抓哪些表)。
 
     按「表」判断而不是按「只」：某只上次只欠现金流量表，这次就只请求现金流量表，
     所以名单档位变了也不用先清空；force=True 才是全部重抓。
     """
-    done = {"balance": {r[0] for r in db.query_rows(
-                "SELECT code FROM fin_capital WHERE has_balance=1")},
-            "cash": {r[0] for r in db.query_rows(
-                "SELECT code FROM fin_capital WHERE has_cash=1")}}
-    out = []
-    for r in db.query_rows("SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code"):
-        want = tuple(n for n, flag in (("balance", r["need_balance"]),
-                                       ("cash", r["need_cash"])) if flag)
-        todo = tuple(n for n in want if force or r["code"] not in done[n])
-        if todo:
-            out.append((r["code"], todo))
-    return out
+    return _todo([(r["code"], r["need_balance"], r["need_cash"])
+                  for r in db.query_rows(
+                      "SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code")],
+                 _done_tables(), force)
 
 
 def _merge_rows(code: str, tables: dict, now: str) -> list[tuple]:
