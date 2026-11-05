@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from . import backtest as bt
 from . import backtest_batch as bt_batch
-from . import boxreplay, capital, cycles, db, rotation, screening
+from . import boxreplay, capital, cycles, db, rotation, screening, stockcycle
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
@@ -217,6 +217,27 @@ def rotation_analysis(index: str = "sh000001", years: float = 5.0, top_n: int = 
         return rotation.analyze(index_code=index, years=years, top_n=top_n)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ---------------- 行业库存与资本周期（财报侧） ----------------
+
+@app.get("/api/cycle/industry")
+def industry_cycle():
+    """31 个申万一级行业的「存货同比 × 资本开支同比」四象限定位（数据来自 F10 回填）。
+
+    只回答行业现在在补库还是去库、在扩产还是在收缩，不给买卖排序。
+    `fin_capital` 为空时返回 ok=False 和该去哪儿回填的提示。
+    """
+    return stockcycle.analyze()
+
+
+@app.get("/api/cycle/industry/series")
+def industry_cycle_series(level1: str, periods: int = Query(stockcycle.SERIES_MAX, ge=4, le=40)):
+    """某行业逐期序列（合计亿元 + 同期同比），用于四象限下钻。"""
+    try:
+        return stockcycle.series(level1, periods)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 # ---------------- watch pools ----------------
