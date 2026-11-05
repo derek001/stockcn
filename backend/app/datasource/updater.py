@@ -19,7 +19,7 @@ import os
 import threading
 import traceback
 
-from .. import db
+from .. import capital, db
 from ..datasource import eastmoney as em
 from ..datasource import qmt as qmt_src
 from ..datasource import tencent as tc
@@ -39,6 +39,7 @@ def _default_status() -> dict:
         "full": _job_state(),
         "incremental": _job_state(),
         "local": _job_state(),
+        "f10": _job_state(),
         "provider": None,
         "qmt_path_raw": None,
         "qmt_path_geo": None,
@@ -49,6 +50,7 @@ def _default_status() -> dict:
         "last_full": None,
         "last_incremental": None,
         "last_local": None,
+        "last_f10": None,
     }
 
 
@@ -89,7 +91,7 @@ def get_status() -> dict:
     with _status_lock:
         st["running"] = sorted(_running.keys())
         active = {_status_key(k) for k in _running}
-    for kind in ("full", "incremental", "local"):
+    for kind in ("full", "incremental", "local", "f10"):
         if kind not in active and st[kind].get("status") == "running":
             st[kind] = {**_job_state(), "status": "error",
                         "message": "任务已中断（服务重启）", "time": st[kind].get("time")}
@@ -115,27 +117,31 @@ def is_busy() -> bool:
         return bool(_running)
 
 
-def start_job(kind: str, paths: tuple[str, str] | None = None, force: bool = False) -> str:
-    """kind: full | incremental | qmt_full | qmt_incremental
+def start_job(kind: str, paths: tuple[str, str] | None = None, force: bool = False,
+              periods: int | None = None) -> str:
+    """kind: full | incremental | qmt_full | qmt_incremental | f10
 
-    本地导入任务的 paths 是 (不复权目录, 等比后复权目录)。
+    本地导入任务的 paths 是 (不复权目录, 等比后复权目录)；f10 任务用 force 表示
+    「已经落库的票也重抓一遍」，periods 是回填的报告期个数。
     """
     with _status_lock:
         if kind in _running:
             return "already running"
-        t = threading.Thread(target=_run_job, args=(kind, paths, force), daemon=True)
+        t = threading.Thread(target=_run_job, args=(kind, paths, force, periods), daemon=True)
         _running[kind] = t
         t.start()
     return "started"
 
 
 def _run_job(kind: str, paths: tuple[str, str] | None = None,
-             force: bool = False) -> None:
+             force: bool = False, periods: int | None = None) -> None:
     try:
         _update(kind, status="running", progress=0, total=0, message="准备中…")
         if kind in LOCAL_KINDS:
             raw, geo = paths or ("", "")
             _job_local(kind, raw, geo, force)
+        elif kind == "f10":
+            _job_f10(force, periods or capital.PERIODS)
         else:
             provider = _probe_provider()
             st = _norm(db.kv_get("data_status", _default_status()))
@@ -466,6 +472,20 @@ def _job_incremental(provider: str) -> None:
             message="列表（含上市日期）/板块/财报/指数已刷新；"
                     f"日线 {rows} 行未改动，"
                     "个股日线请在「数据中心 → 本地数据（QMT 导入）」做增量导入")
+
+
+# ---------- F10 资本开支回填（东财） ----------
+
+def _job_f10(force: bool, periods: int) -> None:
+    total = len(capital.pending(force))
+    _update("f10", total=total, message=f"准备回填 {total} 只…")
+    stat = capital.backfill(progress=lambda d, t, m: _update("f10", progress=d, total=t, message=m),
+                            periods=periods, force=force)
+    msg = (f"回填 {stat['n_codes']} 只 / 写入 {stat['rows']} 行"
+           + (f" / 接口无数据 {stat['empty']} 只" if stat["empty"] else "")
+           + (f" / 失败批次 {len(stat['errors'])}（{'；'.join(stat['errors'][:3])}）"
+              if stat["errors"] else ""))
+    _update("f10", message=msg, final=True)
 
 
 # ---------- 本地导入（QMT 导出目录） ----------

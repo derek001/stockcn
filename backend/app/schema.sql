@@ -156,3 +156,37 @@ CREATE TABLE IF NOT EXISTS bt_batch_item (
   PRIMARY KEY (batch_id, code)
 );
 CREATE INDEX IF NOT EXISTS idx_bt_item_pnl ON bt_batch_item(batch_id, pnl_pct);
+
+-- F10 资本开支口径：混合档样本名单（谁该抓、抓哪张表）
+-- need_balance=营收累计盖到 70% 的宽样本，need_cash=各行业营收前 10 只抓现金流量表
+CREATE TABLE IF NOT EXISTS f10_sample (
+  code TEXT PRIMARY KEY,
+  level1 TEXT NOT NULL,             -- 申万一级（industry.first_level 归并结果）
+  revenue REAL,                     -- 排序基准：最近年报营收，缺年报按最近半年报 x2 折算
+  rank_in_level1 INTEGER,
+  need_balance INTEGER NOT NULL DEFAULT 0,
+  need_cash INTEGER NOT NULL DEFAULT 0,
+  built_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_f10_sample_level ON f10_sample(level1, rank_in_level1);
+
+-- 一行 = 一只票一个报告期，数值为接口原值（元）；接口没给的期留 NULL，不拦在库外
+-- has_balance/has_cash 记的是「这期的数来自哪张表」，两档交叠时同一行会同时置 1
+CREATE TABLE IF NOT EXISTS fin_capital (
+  code TEXT NOT NULL,
+  report_date TEXT NOT NULL,
+  inventory REAL,                   -- 存货
+  cip REAL,                         -- 在建工程
+  fixed_asset REAL,                 -- 固定资产
+  total_assets REAL,
+  accounts_rece REAL,               -- 应收账款
+  contract_liab REAL,               -- 合同负债（下游先付钱＝需求前瞻）
+  monetary_funds REAL,
+  capex_cash REAL,                  -- 购建固定资产等支付的现金
+  operate_cash REAL,                -- 经营活动现金流净额
+  has_balance INTEGER NOT NULL DEFAULT 0,
+  has_cash INTEGER NOT NULL DEFAULT 0,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_fin_capital_date ON fin_capital(report_date);

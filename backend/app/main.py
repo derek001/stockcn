@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from . import backtest as bt
 from . import backtest_batch as bt_batch
-from . import boxreplay, cycles, db, rotation, screening
+from . import boxreplay, capital, cycles, db, rotation, screening
 from .config import FRONTEND_DIST
 from .datasource import updater
 from .indicators import add_boll, add_kdj, add_ma, add_macd, add_rsi, compute_all
@@ -81,6 +81,57 @@ def qmt_import(body: QmtImportReq):
         raise HTTPException(400, "mode 需为 full 或 incremental")
     updater.start_job(kind, (body.raw_path, body.geo_path), body.force)
     return {"ok": True}
+
+
+# ---------------- F10 资本开支数据（东财） ----------------
+
+class F10RunReq(BaseModel):
+    force: bool = False             # 已落库的票也重抓一遍
+    periods: int = capital.PERIODS  # 回填的报告期个数（20 = 5 年 × 4 期）
+    confirm: bool = False           # 大批量请求需操作者明确确认
+
+
+@app.get("/api/data/f10/preview")
+def f10_preview():
+    return capital.preview()
+
+
+@app.post("/api/data/f10/sample/rebuild")
+def f10_sample_rebuild():
+    """按最新财报重算样本名单（只写名单，不联网）。"""
+    if updater.is_busy():
+        raise HTTPException(409, "已有更新任务在运行")
+    return capital.rebuild_sample()
+
+
+@app.post("/api/data/f10/run")
+def f10_run(body: F10RunReq):
+    if updater.is_busy():
+        raise HTTPException(409, "已有更新任务在运行")
+    if not 4 <= body.periods <= 40:
+        raise HTTPException(400, "periods 需在 4~40 之间（4 期 = 1 年）")
+    if not db.query_one("SELECT COUNT(*) AS n FROM f10_sample")["n"]:
+        capital.rebuild_sample()
+        if not db.query_one("SELECT COUNT(*) AS n FROM f10_sample")["n"]:
+            raise HTTPException(409, "名单建不出来：库里没有带营收的财报数据，"
+                                     "先到「在线数据」更新财务报表，再点「重建名单」")
+    plan = capital.pending(body.force)
+    if not plan:
+        raise HTTPException(409, "名单里没有待抓的票：先点「重建名单」把新增的股票纳入名单")
+    left = capital.requests_needed(plan, body.periods)
+    if left > capital.CONFIRM_AT and not body.confirm:
+        raise HTTPException(
+            409, f"这次会向东财发起约 {left} 次请求（{len(plan)} 只），请勾选确认后再发起")
+    updater.start_job("f10", periods=body.periods, force=body.force)
+    return {"ok": True, "codes": len(plan), "requests": left}
+
+
+@app.post("/api/data/f10/clear")
+def f10_clear():
+    """清空已抓的 F10 数据（样本名单保留）。运行中不允许清，避免和写入抢同一张表。"""
+    if updater.is_busy():
+        raise HTTPException(409, "已有更新任务在运行")
+    return {"deleted_rows": capital.clear()}
 
 
 # ---------------- stocks ----------------

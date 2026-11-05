@@ -3,12 +3,29 @@ import { api } from "../api";
 
 interface JobState { status: string; progress: number; total: number; message: string; time: string | null }
 interface Status {
-  full: JobState; incremental: JobState; local: JobState;
+  full: JobState; incremental: JobState; local: JobState; f10: JobState;
   provider: string | null;
   qmt_path_raw: string | null; qmt_path_geo: string | null;
   stock_count: number; running: string[]; last_full: string | null;
-  last_incremental: string | null; last_local: string | null; kline_rows?: number;
+  last_incremental: string | null; last_local: string | null; last_f10: string | null;
+  kline_rows?: number;
   orphan_tables?: string[];
+}
+interface F10Level {
+  level1: string; n_rev: number; revenue_yi: number; finance: boolean;
+  n_balance: number; n_cash: number; cover_pct: number | null;
+}
+interface F10Preview {
+  levels: F10Level[];
+  totals: { n_codes: number; n_balance: number; n_cash: number; requests_est: number };
+  stored: {
+    built_at: string | null; revenue_periods: (string | null)[] | null;
+    n_codes: number; added: number; removed: number;
+  };
+  backfilled: {
+    n_codes: number; rows: number;
+    todo_units: number; todo_codes: number; requests_left: number; confirm_at: number;
+  };
 }
 interface Preview {
   raw_path: string; geo_path: string;
@@ -47,6 +64,10 @@ export default function DataCenter() {
   const [pv, setPv] = useState<Preview | null>(null);
   const [force, setForce] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [f10pv, setF10pv] = useState<F10Preview | null>(null);
+  const [f10Note, setF10Note] = useState("");
+  const [f10Confirm, setF10Confirm] = useState(false);
+  const [showLevels, setShowLevels] = useState(false);
   const [pollErr, setPollErr] = useState("");
   const filled = useRef(false);
 
@@ -109,9 +130,66 @@ export default function DataCenter() {
     }
   };
 
+  const loadF10 = () =>
+    api.get<F10Preview>("/api/data/f10/preview")
+      .then(setF10pv)
+      .catch((e) => setErr(String((e as Error).message)));
+
+  const f10WasRunning = useRef(false);
+  useEffect(() => {
+    loadF10();
+  }, []);
+  useEffect(() => {
+    if (!st) return;
+    const r = st.running.includes("f10");
+    // 回填跑完再取一次：已抓行数、待抓只数只有落库后才准
+    if (f10WasRunning.current && !r) loadF10();
+    f10WasRunning.current = r;
+  }, [st]);
+  // 待抓请求数一变，之前那次勾选就作废（避免确认的是旧数字）
+  useEffect(() => {
+    setF10Confirm(false);
+  }, [f10pv?.backfilled.requests_left]);
+
+  const runF10 = async () => {
+    setErr(""); setF10Note("");
+    try {
+      const r = await api.post<{ codes: number; requests: number }>("/api/data/f10/run",
+        { confirm: f10Confirm });
+      setF10Confirm(false);
+      setF10Note(`已开始回填：本次抓 ${r.codes} 只，约 ${r.requests} 次请求，进度看上面进度条。`);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+
+  const rebuildF10Sample = async () => {
+    setErr("");
+    try {
+      await api.post("/api/data/f10/sample/rebuild");
+      await loadF10();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+
+  const clearF10 = async () => {
+    setErr(""); setF10Note("");
+    if (!window.confirm("清空会删掉已抓取的全部 F10 报表数据（样本名单保留），确定继续？")) return;
+    try {
+      const r = await api.post<{ deleted_rows: number }>("/api/data/f10/clear");
+      setF10Note(`已清空 ${r.deleted_rows} 行，样本名单保留，可直接重新「开始回填」。`);
+      await loadF10();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+
   if (!st) return <div className="panel">加载中… {pollErr || err}</div>;
 
   const busy = st.running.length > 0;
+  const f10Left = f10pv?.backfilled.requests_left ?? 0;
+  const f10NeedConfirm = !!f10pv && f10Left > f10pv.backfilled.confirm_at;
   const rows = st.kline_rows ?? 0;
   const online = st.provider === "em" ? "东方财富" : st.provider === "tc" ? "腾讯财经" : "未探测";
 
@@ -243,6 +321,98 @@ export default function DataCenter() {
           「全量导入」= 用这两个目录整体重建本地日线（首次建库或怀疑历史数据不对时才用，5573 只约 5 分钟，导入期间照常查询）；
           「增量导入」= 只补最新几天，日常用它。上次完成: {st.last_local ?? "从未"}
         </p>
+      </div>
+
+      <div className="panel">
+        <h3>F10 报表数据（东财：存货与资本开支）</h3>
+        <p className="muted" style={{ marginTop: 0 }}>
+          包含：样本名单里每只股票的资产负债表（存货、在建工程、固定资产、合同负债等）
+          和现金流量表（购建长期资产支付的现金、经营现金流），按季度逐期存进本地库，用来做行业库存与资本开支的横向对比。
+          名单只覆盖各行业营收占比靠前的一部分股票，不是全市场。
+        </p>
+        <p className="muted" style={{ marginTop: 0 }}>
+          怎么做：① 点「刷新预览」看名单和已抓情况；② 点「开始回填」抓数据（约一小时，可随时离开页面）；
+          一次请求数超过 {f10pv?.backfilled.confirm_at ?? 200} 次时要先勾下面的确认框才能起；
+          ③ 每天做完「在线数据 → 日常刷新」后，名单会随最新财报变化，先点「重建名单」再回填新增的票。
+        </p>
+        <p className="up" style={{ marginTop: 0 }}>
+          注意：回填期间不要同时跑其他数据任务；中途断了或失败，直接再点一次「开始回填」会接着抓没完成的股票，
+          已抓过的不会重复请求（要全部重抓请点「清空已抓数据」后重跑）。
+        </p>
+        <div className="row" style={{ marginTop: 8 }}>
+          <div className="progress"><div style={{ width: `${pctOf(st.f10)}%` }} /></div>
+          <span>{pctOf(st.f10)}%</span>
+          <span className={st.f10.status === "error" ? "up" : "muted"}>{st.f10.message}</span>
+        </div>
+        <div className="row" style={{ marginTop: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <button className="btn" onClick={loadF10}>刷新预览</button>
+          <button className="btn" disabled={busy} onClick={rebuildF10Sample}>重建名单</button>
+          <button className="btn primary" disabled={busy || f10NeedConfirm && !f10Confirm} onClick={runF10}>
+            {st.f10.status === "running" ? "回填中…" : "开始回填"}
+          </button>
+          <button className="btn" disabled={busy} onClick={clearF10}>清空已抓数据</button>
+          <span className="muted">上次完成: {st.last_f10 ?? "从未"}</span>
+        </div>
+        {f10NeedConfirm && (
+          <p className="up" style={{ margin: "6px 0 0" }}>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={f10Confirm}
+                disabled={busy}
+                onChange={(e) => setF10Confirm(e.target.checked)}
+              />
+              {`这次会向东财发起约 ${f10pv?.backfilled.requests_left ?? 0} 次请求，勾选后才能开始回填`}
+            </label>
+          </p>
+        )}
+        {f10Note && <p className="muted" style={{ marginTop: 6 }}>{f10Note}</p>}
+        {f10pv && (
+          <>
+            <div className="row" style={{ marginTop: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <span className="badge">名单: {f10pv.stored.n_codes} 只</span>
+              <span className="badge">资产负债表: {f10pv.totals.n_balance} 只</span>
+              <span className="badge">现金流量表: {f10pv.totals.n_cash} 只</span>
+              <span className="badge">预计请求: 约 {f10pv.totals.requests_est} 次</span>
+              <span className="badge">已抓: {f10pv.backfilled.n_codes} 只 / {f10pv.backfilled.rows} 行</span>
+              <span className={f10pv.backfilled.todo_units ? "badge up" : "badge"}>
+                {`待抓: ${f10pv.backfilled.todo_codes} 只 / ${f10pv.backfilled.todo_units} 张表`
+                  + `（约 ${f10pv.backfilled.requests_left} 次请求）`}
+              </span>
+              <button className="btn" onClick={() => setShowLevels((v) => !v)}>
+                {showLevels ? "收起逐行业覆盖" : "看逐行业覆盖"}
+              </button>
+            </div>
+            <p className="muted" style={{ marginTop: 4 }}>
+              {`名单按最新财报营收重算后有 ${f10pv.stored.added} 只新增、${f10pv.stored.removed} 只退出`
+                + "（点「重建名单」写入）。"}
+            </p>
+            {showLevels && (
+              <div className="table-wrap" style={{ marginTop: 8, maxHeight: 420 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>行业</th><th>有营收的只数</th><th>行业营收(亿)</th>
+                      <th>资产负债表只数</th><th>营收覆盖率</th><th>现金流量表只数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {f10pv.levels.map((l) => (
+                      <tr key={l.level1} title={l.finance ? "银行/非银金融报表口径不同，整体不参与" : undefined}>
+                        <td>{l.level1}</td>
+                        <td>{l.n_rev}</td>
+                        <td>{l.revenue_yi.toFixed(0)}</td>
+                        <td>{l.finance ? "-" : l.n_balance}</td>
+                        <td>{l.finance ? "-" : `${l.cover_pct}%`}</td>
+                        <td>{l.finance ? "-" : l.n_cash}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
     </>
