@@ -86,8 +86,8 @@ def qmt_import(body: QmtImportReq):
 # ---------------- F10 资本开支数据（东财） ----------------
 
 class F10RunReq(BaseModel):
-    force: bool = False             # 已落库的票也重抓一遍
-    periods: int = capital.PERIODS  # 回填的报告期个数（20 = 5 年 × 4 期）
+    force: bool = False             # 已入库的期也重抓一遍
+    periods: int | None = None      # 回填的报告期个数；不传就沿库里名单记的那套（默认 20 = 5 年）
     confirm: bool = False           # 大批量请求需操作者明确确认
 
 
@@ -105,9 +105,18 @@ def _f10_params(cover: float | None, cf_top: int | None) -> tuple[float, int]:
     return c, t
 
 
+def _f10_periods(periods: int | None) -> int:
+    p = capital.resolve_periods(periods)
+    problems = capital.check_periods(p)
+    if problems:
+        raise HTTPException(400, "回填期数不成立：" + "；".join(problems) + "，任务没起")
+    return p
+
+
 @app.get("/api/data/f10/preview")
-def f10_preview(cover: float | None = None, cf_top: int | None = None):
-    return capital.preview(*_f10_params(cover, cf_top))
+def f10_preview(cover: float | None = None, cf_top: int | None = None,
+                periods: int | None = None):
+    return capital.preview(*_f10_params(cover, cf_top), _f10_periods(periods))
 
 
 @app.post("/api/data/f10/sample/rebuild")
@@ -123,21 +132,24 @@ def f10_sample_rebuild(body: F10RebuildReq | None = None):
 def f10_run(body: F10RunReq):
     if updater.is_busy():
         raise HTTPException(409, "已有更新任务在运行")
-    if not 4 <= body.periods <= 40:
-        raise HTTPException(400, "periods 需在 4~40 之间（4 期 = 1 年）")
+    p = _f10_periods(body.periods)
     if not db.query_one("SELECT COUNT(*) AS n FROM f10_sample")["n"]:
         capital.rebuild_sample()
         if not db.query_one("SELECT COUNT(*) AS n FROM f10_sample")["n"]:
             raise HTTPException(409, "名单建不出来：库里没有带营收的财报数据，"
                                      "先到「在线数据」更新财务报表，再点「重建名单」")
-    plan = capital.pending(body.force)
+    plan = capital.pending(p, body.force)
     if not plan:
-        raise HTTPException(409, "名单里没有待抓的票：先点「重建名单」把新增的股票纳入名单")
-    left = capital.requests_needed(plan, body.periods)
+        raise HTTPException(
+            409, f"没有要补的期：这套名单（{p} 期）已经抓齐了。"
+                 "新的报告期要等披露截止日过了才会进清单"
+                 "（三季报 10-31、年报/一季报 4-30、半年报 8-31）；"
+                 "想往回多要几年就把「回填期数」调大，或者勾「重抓」覆盖一遍")
+    left = capital.requests_needed(plan)
     if left > capital.CONFIRM_AT and not body.confirm:
         raise HTTPException(
             409, f"这次会向东财发起约 {left} 次请求（{len(plan)} 只），请勾选确认后再发起")
-    updater.start_job("f10", periods=body.periods, force=body.force)
+    updater.start_job("f10", periods=p, force=body.force)
     return {"ok": True, "codes": len(plan), "requests": left}
 
 

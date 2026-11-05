@@ -141,7 +141,7 @@ def _run_job(kind: str, paths: tuple[str, str] | None = None,
             raw, geo = paths or ("", "")
             _job_local(kind, raw, geo, force)
         elif kind == "f10":
-            _job_f10(force, periods or capital.PERIODS)
+            _job_f10(force, periods or capital.periods_value())
         else:
             provider = _probe_provider()
             st = _norm(db.kv_get("data_status", _default_status()))
@@ -477,7 +477,8 @@ def _job_incremental(provider: str) -> None:
 # ---------- F10 资本开支回填（东财） ----------
 
 def _job_f10(force: bool, periods: int) -> None:
-    total = len(capital.pending(force))
+    plan = capital.pending(periods, force)
+    total = len(plan)
     _update("f10", total=total, message=f"准备回填 {total} 只…")
     stat = capital.backfill(progress=lambda d, t, m: _update("f10", progress=d, total=t, message=m),
                             periods=periods, force=force)

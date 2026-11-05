@@ -1,14 +1,20 @@
 """东财 F10 资本开支口径：混合档样本名单 + 回填 + 落库。
 
-样本口径（2026-11-05 实测定案，两个门槛在「数据中心 → F10 报表数据」页可调）：
+样本口径（2026-11-05 实测定案，三个参数在「数据中心 → F10 报表数据」页可调）：
 - 分组键＝申万一级（`industry.first_level`）；银行/非银金融共 121 只整体剔除（报表口径不同）；
 - 资产负债表档＝每行业按年报营收累计盖到 `COVER`（默认 70%，可调 30%~95%）的最少只数
   （自适应，默认档实测 688 只，最少的行业 2 只＝石油石化，最多的 82 只＝基础化工）；
 - 现金流量表档＝每行业营收前 `CF_TOP`（默认 10，可调 3~50；默认档实测 290 只）；两档去重 722 只；
-- 一次请求最多带 5 个报告期，所以 20 期＝每表 4 次请求，默认档合计约 3,912 次、实测 0.81s/次 ≈ 55 分钟。
+- 回填深度＝最近 `PERIODS` 个**已过披露截止日**的季末报告期（默认 20 期＝5 年，可调 4~40）。
 
-门槛用哪一套**记在名单里**（`kv` 的 `f10_capital_meta`），所以「重建名单」不传参就沿用上次的口径，
-预览不传参就按库里名单实际用的那套算 —— 改门槛只有一点：调大 ⇒ 新增的票变成待抓，按请求数重新确认。
+抵扣粒度是「票 × 表 × 期」：库里某只某表某期有一行（哪怕字段全 NULL）就算抓过，所以
+- 新季报过了截止日后自动变成缺期，下次点「开始回填」只补那一期，不用先清空；
+- 把期数调大（20→24）只补多出来的那几期，已入库的期不受影响；
+- 一次请求最多带 5 个报告期 ⇒ 某表缺 6 期就是 2 次请求。缺多少期就发多少次，页面按这个数确认。
+
+参数（门槛 + 期数）用哪一套**记在名单里**（`kv` 的 `f10_capital_meta`），所以「重建名单」不传参
+就沿用上次的口径，预览/回填不传参就按库里那套算 —— 改参数只有一点：调大 ⇒ 新增的票/期变成待抓，
+按请求数重新确认。
 
 数值一律按接口原样记（元），接口没给的期留 NULL 而不是拦在库外：数据薄是当期事实，
 下次重跑同一只即自愈。
@@ -25,18 +31,69 @@ COVER = 0.70                 # 资产负债表档要盖到的行业营收占比�
 CF_TOP = 10                  # 现金流量表档：每行业营收前 N（页面可调）
 COVER_RANGE = (0.30, 0.95)   # 再低就盖不出行业结论，再高名单接近全市场、请求数失控
 CF_TOP_RANGE = (3, 50)       # 下限跟着四象限页的 MIN_CODES=5 走，上限防手滑
-PERIODS = 20                 # 回填深度：5 年 × 4 期
+PERIODS = 20                 # 回填深度：5 年 × 4 期（页面可调）
+PERIODS_RANGE = (4, 40)      # 下限 4 期＝1 年（同比要有去年同期），上限防手滑把请求数放大十倍
+# 各季末报告期的法定披露截止（报告期 + 自然日）：年报 4-30、半年报 8-31、一季报 4-30、三季报 10-31。
+# 未按闰年精确到±1 天不要紧：那一期顶多晚一天进清单，下次回填即补上。
+DISCLOSE_DAYS = {(3, 31): 30, (6, 30): 62, (9, 30): 31, (12, 31): 120}
 FINANCE = {"银行", "非银金融"}
 META_KEY = "f10_capital_meta"
 CONFIRM_AT = 200             # 一轮要发这么多请求就得让操作者明确确认（首轮全量约 3900 次）
+
+
+def today() -> dt.date:
+    """留一个可替换的缝隙：断言脚本要按「三季报到期前/后」两个日子算清单。"""
+    return dt.date.today()
+
+
+def disclosed(report_date: str, as_of: dt.date) -> bool:
+    """该报告期过了法定披露截止日没有（过了才可能有人披露，才值得去请求）。"""
+    d = dt.date.fromisoformat(report_date)
+    days = DISCLOSE_DAYS.get((d.month, d.day))
+    return True if days is None else as_of >= d + dt.timedelta(days=days)
+
+
+def target_dates(periods: int | None = None, as_of: dt.date | None = None) -> list[str]:
+    """最近 `periods` 个**已到期**的季末报告期，新→旧。
+
+    先过滤截止日再截个数，所以窗口永远是「有东西可抓的那几期」：三季报在 10-31 之前不会进来，
+    4 月初同时未到期的年报 + 一季报会一起跳掉（窗口整体往前挪，不是少给一期）。
+    """
+    as_of = as_of or today()
+    p = resolve_periods(periods)
+    # 未到期最多连着 4 期，候选池按此放宽，保证截得出 p 个
+    return [d for d in f10.quarter_ends(as_of, p + len(DISCLOSE_DAYS))
+            if disclosed(d, as_of)][:p]
+
+
+def periods_value() -> int:
+    """回填深度：库里名单记的那套；没记过就用代码默认。"""
+    meta = db.kv_get(META_KEY, {}) or {}
+    return int(meta.get("periods", PERIODS))
+
+
+def resolve_periods(periods: int | None = None) -> int:
+    return periods_value() if periods is None else int(periods)
+
+
+def check_periods(periods) -> list[str]:
+    """期数是否可用；返回问题列表（空=可用）。页面按它拦按钮，后端按它返 400。"""
+    lo, hi = PERIODS_RANGE
+    try:
+        p = float(periods)
+    except (TypeError, ValueError):
+        p = float("nan")
+    return [] if p == int(p) and lo <= int(p) <= hi else [
+        f"回填期数要是 {lo}~{hi} 之间的整数（现在 {periods}；4 期＝1 年）"]
 
 
 def requests_per_table(periods: int = PERIODS) -> int:
     return -(-periods // f10.BATCH)         # 接口一次最多 5 期
 
 
-def requests_needed(plan: list[tuple[str, tuple[str, ...]]], periods: int = PERIODS) -> int:
-    return sum(len(t) for _c, t in plan) * requests_per_table(periods)
+def requests_needed(plan: list[tuple[str, dict[str, tuple[str, ...]]]]) -> int:
+    """按「票×表」各自的缺期数算请求次数（一批最多 5 期，缺 6 期就发 2 次）。"""
+    return sum(-(-len(v) // f10.BATCH) for _c, todo in plan for v in todo.values())
 
 
 def params() -> dict:
@@ -165,76 +222,108 @@ def rebuild_sample(cover: float | None = None, cf_top: int | None = None) -> dic
     return {"sample": meta, "levels": levels}
 
 
-def preview(cover: float | None = None, cf_top: int | None = None) -> dict:
-    """面板用：按这套门槛重算的名单 vs 库里名单差多少、重建后还欠多少请求，以及逐行业覆盖率。
+def preview(cover: float | None = None, cf_top: int | None = None,
+            periods: int | None = None) -> dict:
+    """面板用：按这套参数重算的名单 vs 库里名单差多少、重建后还欠多少请求，以及逐行业覆盖率。
 
-    不传参就按库里名单实际用的那套门槛算（`params()`），所以页面没改输入时看到的数字
-    就是当前名单的口径；改了输入就等于「重建之后会变成什么样」。
+    不传参就按库里那套参数算（`params()` / `periods_value()`），所以页面没改输入时看到的数字
+    就是当前名单的口径；改了输入就等于「重建之后会变成什么样」。请求数一律按**还缺的期**算，
+    不是按「只」算 —— 补齐一个新季度只需要 1 期，跟首轮全量 20 期不是一笔账。
     """
     cover, cf_top = resolve_params(cover, cf_top)
-    rows, levels, _periods = sample_rows(cover, cf_top)
+    p = resolve_periods(periods)
+    rows, levels, _rev_periods = sample_rows(cover, cf_top)
     want = {r["code"] for r in rows}
     stored_rows = db.query_rows("SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code")
     stored = {r["code"] for r in stored_rows}
     got = {r[0] for r in db.query_rows("SELECT DISTINCT code FROM fin_capital")}
-    done = _done_tables()
-    new_todo = _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in rows], done)
-    left = _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in stored_rows], done)
+    dates = target_dates(p)
+    done = _done_dates()
+    r_t = [(x["code"], x["need_balance"], x["need_cash"]) for x in rows]
+    s_t = [(x["code"], x["need_balance"], x["need_cash"]) for x in stored_rows]
+    new_todo = _todo(r_t, done, dates)
+    left = _todo(s_t, done, dates)
     n_bs = sum(1 for r in rows if r["need_balance"])
     n_cf = sum(1 for r in rows if r["need_cash"])
     meta = db.kv_get(META_KEY, {}) or {}
     return {"params": {"cover": cover, "cf_top": cf_top, "cover_range": list(COVER_RANGE),
                        "cf_top_range": list(CF_TOP_RANGE),
-                       "default_cover": COVER, "default_cf_top": CF_TOP},
+                       "default_cover": COVER, "default_cf_top": CF_TOP,
+                       "periods": p, "periods_range": list(PERIODS_RANGE),
+                       "default_periods": PERIODS},
             "levels": levels,
             "totals": {"n_codes": len(rows), "n_balance": n_bs, "n_cash": n_cf,
-                       "requests_est": (n_bs + n_cf) * requests_per_table()},
+                       "requests_est": (n_bs + n_cf) * requests_per_table(p)},
             "stored": {"built_at": meta.get("built_at"), "cover": meta.get("cover"),
                        "cf_top": meta.get("cf_top"),
                        "revenue_periods": meta.get("revenue_periods"),
                        "n_codes": len(stored),
                        "added": len(want - stored), "removed": len(stored - want)},
-            # 按这套门槛重建名单之后还要发多少请求（已抓过的那张表抵扣掉）
+            # 按这套门槛重建名单之后还要发多少请求（库里已有的「票×表×期」抵扣掉）
             "if_rebuilt": {"codes": len(new_todo), "units": sum(len(t) for _c, t in new_todo),
+                           "dates": sum(len(v) for _c, t in new_todo for v in t.values()),
                            "requests": requests_needed(new_todo)},
             "backfilled": {"n_codes": len(got), "rows": db.query_one(
                 "SELECT COUNT(*) n FROM fin_capital")["n"],
-                # todo_units = 还欠几张表（一只票可能只欠现金流量表）
+                # todo_units = 还欠几张表（一只票可能只欠现金流量表），todo_dates = 还欠几期
                 "todo_units": sum(len(t) for _c, t in left),
                 "todo_codes": len(left),
+                "todo_dates": sum(len(v) for _c, t in left for v in t.values()),
                 "requests_left": requests_needed(left),
+                "window": {"first": dates[0] if dates else None,
+                           "last": dates[-1] if dates else None, "n": len(dates)},
                 "confirm_at": CONFIRM_AT}}
 
 
-def _done_tables() -> dict[str, set[str]]:
-    """每张表「已经抓过」的票（同 code 抓过 balance 不代表抓过 cash）。"""
-    return {"balance": {r[0] for r in db.query_rows(
-                "SELECT code FROM fin_capital WHERE has_balance=1")},
-            "cash": {r[0] for r in db.query_rows(
-                "SELECT code FROM fin_capital WHERE has_cash=1")}}
-
-
-def _todo(rows: list[tuple[str, int, int]], done: dict[str, set[str]],
-          force: bool = False) -> list[tuple[str, tuple[str, ...]]]:
-    out = []
-    for code, need_bs, need_cf in rows:
-        want = tuple(n for n, flag in (("balance", need_bs), ("cash", need_cf)) if flag)
-        todo = tuple(n for n in want if force or code not in done[n])
-        if todo:
-            out.append((code, todo))
+def _done_dates() -> dict[str, dict[str, set[str]]]:
+    """每张表「哪些票的哪些期已经抓过」——有行就算，字段全 NULL 也算（如实记录，不重复请求）。"""
+    out = {"balance": defaultdict(set), "cash": defaultdict(set)}
+    for r in db.query_rows("SELECT code,report_date,has_balance,has_cash FROM fin_capital"):
+        if r["has_balance"]:
+            out["balance"][r["code"]].add(r["report_date"])
+        if r["has_cash"]:
+            out["cash"][r["code"]].add(r["report_date"])
     return out
 
 
-def pending(force: bool = False) -> list[tuple[str, tuple[str, ...]]]:
-    """名单里还欠抓的 (代码, 要抓哪些表)。
+def _todo(rows: list[tuple[str, int, int]], done: dict[str, dict[str, set[str]]],
+          dates: list[str], force: bool = False) -> list[tuple[str, dict[str, tuple[str, ...]]]]:
+    """(代码, {表: 缺哪几期})。缺期按 `dates` 的新→旧顺序，所以一批请求带的是最靠近的几期。"""
+    out = []
+    for code, need_bs, need_cf in rows:
+        want = {}
+        for name, flag in (("balance", need_bs), ("cash", need_cf)):
+            if not flag:
+                continue
+            got = done[name].get(code, ())
+            miss = tuple(d for d in dates if force or d not in got)
+            if miss:
+                want[name] = miss
+        if want:
+            out.append((code, want))
+    return out
 
-    按「表」判断而不是按「只」：某只上次只欠现金流量表，这次就只请求现金流量表，
-    所以名单档位变了也不用先清空；force=True 才是全部重抓。
+
+def sample_todo(cover: float | None = None, cf_top: int | None = None,
+                periods: int | None = None, force: bool = False):
+    """按这套门槛（不落库）算还欠哪些期，返回 (计划, 名单行, 目标期)。"""
+    cover, cf_top = resolve_params(cover, cf_top)
+    rows, _levels, _rev_periods = sample_rows(cover, cf_top)
+    dates = target_dates(periods)
+    return _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in rows],
+                 _done_dates(), dates, force), rows, dates
+
+
+def pending(periods: int | None = None, force: bool = False) -> list[tuple[str, dict[str, tuple[str, ...]]]]:
+    """库里名单还欠抓的 (代码, {表: 缺哪几期})。
+
+    按「票×表×期」抵扣：某只上次只欠现金流量表就只请求现金流量表；新披露的季度是库里没有的那期，
+    所以它会自己变成缺期，不用先清空整层；force=True 才是全窗口重抓。
     """
     return _todo([(r["code"], r["need_balance"], r["need_cash"])
                   for r in db.query_rows(
                       "SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code")],
-                 _done_tables(), force)
+                 _done_dates(), target_dates(periods), force)
 
 
 def _merge_rows(code: str, tables: dict, now: str) -> list[tuple]:
@@ -271,16 +360,20 @@ UPSERT = (
     "fetched_at=excluded.fetched_at")
 
 
-def backfill(progress=None, periods: int = PERIODS, force: bool = False) -> dict:
-    """逐只抓 F10 并落库。progress(done, total, msg) 由调用方给（updater 用它更新徽章）。"""
+def backfill(progress=None, periods: int | None = None, force: bool = False) -> dict:
+    """逐只抓 F10 并落库。progress(done, total, msg) 由调用方给（updater 用它更新徽章）。
+
+    每只票只发「它缺的那几张表 × 各自缺的期」这些请求：新季度只补新季度，
+    把期数调大只补多出来的期，接口没回的期下次还会再来一次。
+    """
     if not db.query_one("SELECT COUNT(*) n FROM f10_sample")["n"]:
         rebuild_sample()
-    plan = pending(force)
-    dates = f10.quarter_ends(dt.date.today(), periods)
+    p = resolve_periods(periods)
+    plan = pending(p, force)
     now = dt.datetime.now().isoformat(timespec="seconds")
     stat = {"n_codes": len(plan), "rows": 0, "empty": 0, "errors": []}
-    for i, (code, tables) in enumerate(plan):
-        res = f10.fetch_stock(code, dates, tables)
+    for i, (code, todo) in enumerate(plan):
+        res = f10.fetch_stock(code, todo)
         rows = _merge_rows(code, res["tables"], now)
         if rows:
             with db.transaction() as conn:
@@ -291,9 +384,10 @@ def backfill(progress=None, periods: int = PERIODS, force: bool = False) -> dict
         if res["errors"]:
             stat["errors"].append(f"{code}: " + ";".join(res["errors"]))
         if progress:
-            progress(i + 1, len(plan), f"F10 回填 {i + 1}/{len(plan)}（{code} {'+'.join(tables)}）")
+            progress(i + 1, len(plan),
+                     f"F10 回填 {i + 1}/{len(plan)}（{code} {'+'.join(todo)}）")
     db.kv_set(META_KEY, {**db.kv_get(META_KEY, {}),
-                         "backfill_at": now, "periods": periods,
+                         "backfill_at": now, "periods": p,
                          "last_rows": stat["rows"], "last_empty": stat["empty"],
                          "last_errors": stat["errors"][:20]})
     return stat

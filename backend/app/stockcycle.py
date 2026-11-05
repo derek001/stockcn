@@ -163,7 +163,7 @@ def analyze() -> dict:
     bal_p = _pick_period(flat, "inventory", n_bal)
     cash_p = _pick_period(flat, "capex_cash", n_cash)
     if not bal_p and not cash_p:
-        left = capital.requests_needed(capital.pending(), capital.PERIODS)
+        left = capital.requests_needed(capital.pending())
         action = (
             "到「数据中心 → F10 报表数据」点「重建名单」，再点「开始回填」"
             if not left else

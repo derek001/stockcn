@@ -96,14 +96,18 @@ def _fetch_table(path: str, list_key: str, fields: dict,
     return rows, errors
 
 
-def fetch_stock(code: str, dates: list[str], tables: tuple[str, ...] = ("balance", "cash")) -> dict:
-    """抓一只票的若干张表。返回 {"tables": {名: [行]}, "errors": [批次说明]}。"""
+def fetch_stock(code: str, dates: dict[str, list[str]]) -> dict:
+    """抓一只票的若干张表，每张表各带自己该补的报告期。
+
+    `dates` = {表名: [报告期,…]}：某只的负债表已齐、只欠现金流表最新一期时，就只发那一次请求。
+    返回 {"tables": {名: [行]}, "errors": [批次说明]}。
+    """
     f10 = f10_code(code)
     out: dict[str, list[dict]] = {}
     errors: list[str] = []
-    for name in tables:
+    for name, ds in dates.items():
         path, key, fields = TABLES[name]
-        rows, errs = _fetch_table(path, key, fields, f10, dates)
+        rows, errs = _fetch_table(path, key, fields, f10, list(ds))
         out[name] = rows
         errors += errs
     return {"tables": out, "errors": errors}
