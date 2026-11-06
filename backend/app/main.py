@@ -140,11 +140,14 @@ def f10_run(body: F10RunReq):
                                      "先到「在线数据」更新财务报表，再点「重建名单」")
     plan = capital.pending(p, body.force)
     if not plan:
+        skipped = sum(len(v) for t in capital.asked_empty().values() for v in t.values())
         raise HTTPException(
             409, f"没有要补的期：这套名单（{p} 期）已经抓齐了。"
                  "新的报告期要等披露截止日过了才会进清单"
                  "（三季报 10-31、年报/一季报 4-30、半年报 8-31）；"
-                 "想往回多要几年就把「回填期数」调大，或者勾「重抓」覆盖一遍")
+                 "想往回多要几年就把「回填期数」调大，或者勾「重抓」覆盖一遍"
+                 + (f"；另有 {skipped} 个「问过但接口没回」的期被跳过，要重问就点「清掉重试记录」"
+                    if skipped else ""))
     left = capital.requests_needed(plan)
     if left > capital.CONFIRM_AT and not body.confirm:
         raise HTTPException(
@@ -155,10 +158,21 @@ def f10_run(body: F10RunReq):
 
 @app.post("/api/data/f10/clear")
 def f10_clear():
-    """清空已抓的 F10 数据（样本名单保留）。运行中不允许清，避免和写入抢同一张表。"""
+    """清空已抓的 F10 数据（样本名单保留）。运行中不允许清，避免和写入抢同一张表。
+
+    「问过但接口没回」的记录跟着一起清：数据都没了，留着记录会把重抓压成 0 次请求。
+    """
     if updater.is_busy():
         raise HTTPException(409, "已有更新任务在运行")
     return {"deleted_rows": capital.clear()}
+
+
+@app.post("/api/data/f10/attempts/clear")
+def f10_attempts_clear():
+    """只清「问过但接口没回」的重试记录：报表数据与名单都不动，清完下次回填恢复对这些期重试。"""
+    if updater.is_busy():
+        raise HTTPException(409, "已有更新任务在运行")
+    return {"cleared_periods": capital.clear_attempts()}
 
 
 # ---------------- stocks ----------------

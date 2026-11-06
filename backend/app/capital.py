@@ -12,6 +12,14 @@
 - 把期数调大（20→24）只补多出来的那几期，已入库的期不受影响；
 - 一次请求最多带 5 个报告期 ⇒ 某表缺 6 期就是 2 次请求。缺多少期就发多少次，页面按这个数确认。
 
+「问过但接口没回」的期记在 kv（`f10_asked_empty`，结构 {表: {代码: [报告期]}}），下次不再白问：
+次新股的上市前报告期接口确无（2026-11-06 拿 52 次直连回证，真有数的是 0 期），旧口径每轮都会重发
+那 55 次请求。三条缝让它不会变成「永久压住的脏状态」：
+- 窗口里最新那期（`EMPTY_RETRY` 期内）即使记过也照问，晚披露的能自愈；
+- 批次报错不算问过（是我们没问到，不是它没数），那几期下次照问；
+- 清理有两个入口：「清掉重试记录」只删这份记录（恢复全量重试），「清空 F10 数据」连记录一起删
+  （否则清空重抓会被历史记录压成 0 次请求）。记录只保留当前窗口内的期，窗口缩小后自动收干。
+
 参数（门槛 + 期数）用哪一套**记在名单里**（`kv` 的 `f10_capital_meta`），所以「重建名单」不传参
 就沿用上次的口径，预览/回填不传参就按库里那套算 —— 改参数只有一点：调大 ⇒ 新增的票/期变成待抓，
 按请求数重新确认。
@@ -38,6 +46,9 @@ PERIODS_RANGE = (4, 40)      # 下限 4 期＝1 年（同比要有去年同期�
 DISCLOSE_DAYS = {(3, 31): 30, (6, 30): 62, (9, 30): 31, (12, 31): 120}
 FINANCE = {"银行", "非银金融"}
 META_KEY = "f10_capital_meta"
+ATTEMPTS_KEY = "f10_asked_empty"   # 「问过但接口没回」的期：{表: {代码: [报告期]}}
+EMPTY_RETRY = 1                    # 窗口里最近这几期即使记过也照问（晚披露自愈），代价只是一轮新期请求
+_PATH_TO_TABLE = {v[0]: k for k, v in f10.TABLES.items()}   # zcfzbAjaxNew→balance、xjllbAjaxNew→cash
 CONFIRM_AT = 200             # 一轮要发这么多请求就得让操作者明确确认（首轮全量约 3900 次）
 
 
@@ -239,10 +250,23 @@ def preview(cover: float | None = None, cf_top: int | None = None,
     got = {r[0] for r in db.query_rows("SELECT DISTINCT code FROM fin_capital")}
     dates = target_dates(p)
     done = _done_dates()
+    rec = asked_empty()
     r_t = [(x["code"], x["need_balance"], x["need_cash"]) for x in rows]
     s_t = [(x["code"], x["need_balance"], x["need_cash"]) for x in stored_rows]
-    new_todo = _todo(r_t, done, dates)
-    left = _todo(s_t, done, dates)
+    new_todo = _todo(r_t, done, dates, empty=rec)
+    left = _todo(s_t, done, dates, empty=rec)
+    # 「问过且空」压住了多少：不看那份记录本来会问多少，跟现在比就是清掉记录要多花的请求
+    left_full = _todo(s_t, done, dates)
+    kept = {c: {n: set(v) for n, v in t.items()} for c, t in left}
+    sup_codes: set[str] = set()
+    sup_dates = 0
+    for c, todo in left_full:
+        for name, v in todo.items():
+            extra = [d for d in v if d not in kept.get(c, {}).get(name, ())]
+            if extra:
+                sup_codes.add(c)
+                sup_dates += len(extra)
+    sup_requests = requests_needed(left_full) - requests_needed(left)
     n_bs = sum(1 for r in rows if r["need_balance"])
     n_cf = sum(1 for r in rows if r["need_cash"])
     meta = db.kv_get(META_KEY, {}) or {}
@@ -270,6 +294,9 @@ def preview(cover: float | None = None, cf_top: int | None = None,
                 "todo_codes": len(left),
                 "todo_dates": sum(len(v) for _c, t in left for v in t.values()),
                 "requests_left": requests_needed(left),
+                # suppressed_* = 被「问过且空」记录压住的部分；清掉那份记录就要多发 sup_requests 次
+                "suppressed_dates": sup_dates, "suppressed_requests": sup_requests,
+                "suppressed_codes": len(sup_codes),
                 "window": {"first": dates[0] if dates else None,
                            "last": dates[-1] if dates else None, "n": len(dates)},
                 "confirm_at": CONFIRM_AT}}
@@ -287,8 +314,14 @@ def _done_dates() -> dict[str, dict[str, set[str]]]:
 
 
 def _todo(rows: list[tuple[str, int, int]], done: dict[str, dict[str, set[str]]],
-          dates: list[str], force: bool = False) -> list[tuple[str, dict[str, tuple[str, ...]]]]:
-    """(代码, {表: 缺哪几期})。缺期按 `dates` 的新→旧顺序，所以一批请求带的是最靠近的几期。"""
+          dates: list[str], force: bool = False,
+          empty: dict[str, dict[str, set[str]]] | None = None
+          ) -> list[tuple[str, dict[str, tuple[str, ...]]]]:
+    """(代码, {表: 缺哪几期})。缺期按 `dates` 的新→旧顺序，所以一批请求带的是最靠近的几期。
+
+    `empty` 是「问过但接口没回」的记录：那些期不再重复请求，只有窗口最新 `EMPTY_RETRY` 期例外
+    （新披露的季度本来就欠着，晚披露的也得给它几次机会）；`force` 时记录和已入库的行都不看。
+    """
     out = []
     for code, need_bs, need_cf in rows:
         want = {}
@@ -296,12 +329,37 @@ def _todo(rows: list[tuple[str, int, int]], done: dict[str, dict[str, set[str]]]
             if not flag:
                 continue
             got = done[name].get(code, ())
-            miss = tuple(d for d in dates if force or d not in got)
+            asked = () if force or empty is None else empty.get(name, {}).get(code, ())
+            miss = tuple(d for i, d in enumerate(dates)
+                         if force or (d not in got and (i < EMPTY_RETRY or d not in asked)))
             if miss:
                 want[name] = miss
         if want:
             out.append((code, want))
     return out
+
+
+def asked_empty() -> dict[str, dict[str, set[str]]]:
+    """kv 里记的「问过但接口没回」清单：{表: {代码: {报告期}}}。"""
+    raw = db.kv_get(ATTEMPTS_KEY, {}) or {}
+    return {n: {c: set(v) for c, v in (raw.get(n) or {}).items()} for n in ("balance", "cash")}
+
+
+def clear_attempts() -> int:
+    """清掉「问过且空」记录（数据一行不动）；清完后下次回填恢复对这些期的重试。"""
+    rec = asked_empty()
+    n = sum(len(v) for t in rec.values() for v in t.values())
+    db.kv_set(ATTEMPTS_KEY, {})
+    return n
+
+
+def _store_records(rec: dict[str, dict[str, set[str]]], dates: list[str],
+                   done: dict[str, dict[str, set[str]]]) -> dict:
+    """写回 kv：只留当前窗口内、且库里仍然没数的期（窗口调小或后来补到数都跟着收干）。"""
+    keep = set(dates)
+    return {n: {c: [d for d in dates if d in v - set(done[n].get(c, ()))]
+                for c, v in sorted(t.items()) if (v - set(done[n].get(c, ()))) & keep}
+            for n, t in rec.items() if t}
 
 
 def sample_todo(cover: float | None = None, cf_top: int | None = None,
@@ -311,7 +369,7 @@ def sample_todo(cover: float | None = None, cf_top: int | None = None,
     rows, _levels, _rev_periods = sample_rows(cover, cf_top)
     dates = target_dates(periods)
     return _todo([(r["code"], r["need_balance"], r["need_cash"]) for r in rows],
-                 _done_dates(), dates, force), rows, dates
+                 _done_dates(), dates, force, asked_empty()), rows, dates
 
 
 def pending(periods: int | None = None, force: bool = False) -> list[tuple[str, dict[str, tuple[str, ...]]]]:
@@ -319,11 +377,12 @@ def pending(periods: int | None = None, force: bool = False) -> list[tuple[str, 
 
     按「票×表×期」抵扣：某只上次只欠现金流量表就只请求现金流量表；新披露的季度是库里没有的那期，
     所以它会自己变成缺期，不用先清空整层；force=True 才是全窗口重抓。
+    「问过但接口没回」的旧期不重复问（见 `asked_empty()`），清掉那份记录或它是窗口最新一期才会再来。
     """
     return _todo([(r["code"], r["need_balance"], r["need_cash"])
                   for r in db.query_rows(
                       "SELECT code,need_balance,need_cash FROM f10_sample ORDER BY code")],
-                 _done_dates(), target_dates(periods), force)
+                 _done_dates(), target_dates(periods), force, asked_empty())
 
 
 def _merge_rows(code: str, tables: dict, now: str) -> list[tuple]:
@@ -364,16 +423,29 @@ def backfill(progress=None, periods: int | None = None, force: bool = False) -> 
     """逐只抓 F10 并落库。progress(done, total, msg) 由调用方给（updater 用它更新徽章）。
 
     每只票只发「它缺的那几张表 × 各自缺的期」这些请求：新季度只补新季度，
-    把期数调大只补多出来的期，接口没回的期下次还会再来一次。
+    把期数调大只补多出来的期。接口没回的期写进「问过且空」记录，下次不再白问
+    （批次报错的不写——那是我们没问到，不是它没数）。
     """
     if not db.query_one("SELECT COUNT(*) n FROM f10_sample")["n"]:
         rebuild_sample()
     p = resolve_periods(periods)
     plan = pending(p, force)
     now = dt.datetime.now().isoformat(timespec="seconds")
-    stat = {"n_codes": len(plan), "rows": 0, "empty": 0, "errors": []}
+    stat = {"n_codes": len(plan), "rows": 0, "empty": 0, "marked": 0, "errors": []}
+    rec = asked_empty()
     for i, (code, todo) in enumerate(plan):
         res = f10.fetch_stock(code, todo)
+        # 报错的批次不算「问过」：错误串以接口路径开头（zcfzbAjaxNew / xjllbAjaxNew），按路径找到表名
+        failed = {_PATH_TO_TABLE.get(str(e).split(" ")[0]) for e in res["errors"]}
+        for name, dates in todo.items():
+            if name in failed:
+                continue
+            got = {row["report_date"] for row in res["tables"].get(name) or []}
+            miss = [d for d in dates if d not in got]
+            if miss:
+                before = len(rec[name].get(code, ()))
+                rec[name].setdefault(code, set()).update(miss)
+                stat["marked"] += len(rec[name][code]) - before
         rows = _merge_rows(code, res["tables"], now)
         if rows:
             with db.transaction() as conn:
@@ -386,6 +458,7 @@ def backfill(progress=None, periods: int | None = None, force: bool = False) -> 
         if progress:
             progress(i + 1, len(plan),
                      f"F10 回填 {i + 1}/{len(plan)}（{code} {'+'.join(todo)}）")
+    db.kv_set(ATTEMPTS_KEY, _store_records(rec, target_dates(p), _done_dates()))
     db.kv_set(META_KEY, {**db.kv_get(META_KEY, {}),
                          "backfill_at": now, "periods": p,
                          "last_rows": stat["rows"], "last_empty": stat["empty"],
@@ -394,7 +467,11 @@ def backfill(progress=None, periods: int | None = None, force: bool = False) -> 
 
 
 def clear() -> int:
-    """把 F10 数据整层清空（样本名单保留，便于重抓；名单本身用 rebuild_sample 重建）。"""
+    """把 F10 数据整层清空（样本名单保留，便于重抓；名单本身用 rebuild_sample 重建）。
+
+    「问过且空」记录跟着一起清：数据都清空了，留着记录会让「重抓」被压成 0 次请求。
+    """
     n = db.query_one("SELECT COUNT(*) n FROM fin_capital")["n"]
     db.execute("DELETE FROM fin_capital")
+    db.kv_set(ATTEMPTS_KEY, {})
     return int(n)

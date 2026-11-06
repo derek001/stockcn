@@ -34,6 +34,8 @@ interface F10Preview {
   backfilled: {
     n_codes: number; rows: number;
     todo_units: number; todo_codes: number; todo_dates: number; requests_left: number;
+    // 被「问过但接口没回」记录压住的部分：清掉记录就恢复重试
+    suppressed_dates: number; suppressed_requests: number; suppressed_codes: number;
     window: { first: string | null; last: string | null; n: number };
     confirm_at: number;
   };
@@ -241,11 +243,30 @@ export default function DataCenter() {
 
   const clearF10 = async () => {
     setErr(""); setF10Note("");
-    if (!window.confirm("清空会删掉已抓取的全部 F10 报表数据（样本名单保留），确定继续？")) return;
+    if (!window.confirm("清空会删掉已抓取的全部 F10 报表数据（样本名单保留，重试记录也一起清掉），确定继续？")) return;
     try {
       const r = await api.post<{ deleted_rows: number }>("/api/data/f10/clear");
-      setF10Note(`已清空 ${r.deleted_rows} 行，样本名单保留，可直接重新「开始回填」。`);
+      setF10Note(`已清空 ${r.deleted_rows} 行（「问过没回」的重试记录同时清掉，重抓不会被压成 0 次请求），`
+        + "样本名单保留，可直接重新「开始回填」。");
       await loadF10();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+
+  const clearF10Attempts = async () => {
+    setErr(""); setF10Note("");
+    const s = f10pv?.backfilled;
+    if (!s?.suppressed_dates) return;
+    if (!window.confirm(`清掉「问过但接口没回」的重试记录？\n报表数据和名单都不动；`
+      + `压住的 ${s.suppressed_dates} 期（${s.suppressed_codes} 只）会放回清单，`
+      + `下次「开始回填」多发约 ${s.suppressed_requests} 次请求（点了才开始抓）。`)) return;
+    try {
+      const r = await api.post<{ cleared_periods: number }>("/api/data/f10/attempts/clear");
+      const p = await loadF10();
+      setF10Note(`已清掉 ${r.cleared_periods} 条重试记录`
+        + (p ? `，现在「开始回填会抓」= ${p.backfilled.todo_codes} 只 / 缺 ${p.backfilled.todo_dates} 期`
+              + `（约 ${p.backfilled.requests_left} 次请求），点「开始回填」才会真的去抓。` : "。"));
     } catch (e) {
       setErr(String((e as Error).message));
     }
@@ -474,6 +495,15 @@ export default function DataCenter() {
             重抓已入库的期
           </label>
           <button className="btn" disabled={busy} onClick={clearF10}>清空已抓数据</button>
+          <button className="btn" disabled={busy || !f10pv?.backfilled.suppressed_dates}
+            onClick={clearF10Attempts}
+            title={f10pv?.backfilled.suppressed_dates
+              ? `清掉后这 ${f10pv.backfilled.suppressed_dates} 期放回清单，下次回填多发约 ${f10pv.backfilled.suppressed_requests} 次请求`
+              : "当前没有「问过但接口没回」被压住的期，没什么可清"}>
+            {f10pv?.backfilled.suppressed_dates
+              ? `清掉重试记录（会重问 ${f10pv.backfilled.suppressed_requests} 次）`
+              : "清掉重试记录（当前没有压住的期）"}
+          </button>
           <span className="muted">上次完成: {st.last_f10 ?? "从未"}</span>
         </div>
         {f10NeedConfirm && (
@@ -514,6 +544,12 @@ export default function DataCenter() {
                 {`开始回填会抓: ${f10pv.backfilled.todo_codes} 只 / ${f10pv.backfilled.todo_units} 张表`
                   + ` / 缺 ${f10pv.backfilled.todo_dates} 期（约 ${f10pv.backfilled.requests_left} 次请求）`}
               </span>
+              {!!f10pv.backfilled.suppressed_dates && (
+                <span className="badge">
+                  {`其中 ${f10pv.backfilled.suppressed_dates} 期问过没回，不再重复请求`
+                    + `（${f10pv.backfilled.suppressed_codes} 只；清掉重试记录要重问 ${f10pv.backfilled.suppressed_requests} 次）`}
+                </span>
+              )}
               <button className="btn" onClick={() => setShowLevels((v) => !v)}>
                 {showLevels ? "收起逐行业覆盖" : "看逐行业覆盖"}
               </button>
@@ -523,6 +559,8 @@ export default function DataCenter() {
                 + ` ${f10pv.stored.added} 只新增、${f10pv.stored.removed} 只退出（点「重建名单」写入）。`}
               {"「重建后还欠」= 换成这套门槛后还缺的表与期；「开始回填会抓」= 按库里现有名单算的欠账，两者不等说明名单该重建了。"}
               {"一张表缺 5 期以内算一次请求（接口一批最多带 5 期），所以请求数比分显示的「张表数」更贴近真实开销。"}
+              {"「问过没回」= 上次抓的时候接口对这些报告期没返回数据（多是次新股上市前的期），记下来就不再白问；"}
+              {"窗口里最新那期每轮都会再问一次，晚披露的能自己补上。点「清掉重试记录」恢复全量重试，报表数据和名单都不动。"}
             </p>
             {showLevels && (
               <div className="table-wrap" style={{ marginTop: 8, maxHeight: 420 }}>
